@@ -1,0 +1,1571 @@
+use ocql_common::Span;
+use ocql_ql_ast::*;
+use ocql_ql_ast::annotation::*;
+use ocql_ql_ast::expr::*;
+use ocql_ql_ast::formula::*;
+use ocql_ql_ast::module::*;
+use ocql_ql_ast::predicate::*;
+use ocql_ql_ast::query::*;
+use ocql_ql_ast::ty::*;
+use crate::lexer::{Token, LexicalError};
+
+grammar;
+
+// ─── Macros ───────────────────────────────────────────────────────
+
+Comma<T>: Vec<T> = {
+    <mut v:(<T> ",")*> <e:T?> => match e {
+        None => v,
+        Some(e) => { v.push(e); v }
+    }
+};
+
+CommaPlus<T>: Vec<T> = {
+    <mut v:(<T> ",")*> <e:T> => { v.push(e); v }
+};
+
+// ─── Qualified :: chains ─────────────────────────────────────────
+// A chain like A::B, A::B::C, A::b, A::B::c, etc.
+// Used by TypeExprRule, ModuleExprRule, and PrimaryExpr.
+// Returns (qualifier_string, final_name_string).
+// Right-recursive to avoid LALR shift-reduce conflicts.
+
+// Left-recursive qualified :: chain. Returns (qualifier_string, final_name_string).
+// Examples: A::b → ("A", "b"), A::B::c → ("A::B", "c"), A::<T>::b → ("A", "b")
+QualChain: (String, String) = {
+    // Base: Upper::lower or Upper::Upper
+    <first:UpperNameRule> "::" <name:LowerNameRule> => (first.name, name.name),
+    <first:UpperNameRule> "::" <name:UpperNameRule> => (first.name, name.name),
+    // Parameterized base: Upper::<Args>::lower or Upper::<Args>::Upper
+    <first:UpperNameRule> "::<" <_args:CommaPlus<ModuleArgInner>> ">" "::" <name:LowerNameRule> => (first.name, name.name),
+    <first:UpperNameRule> "::<" <_args:CommaPlus<ModuleArgInner>> ">" "::" <name:UpperNameRule> => (first.name, name.name),
+    // Recursive: chain::lower or chain::Upper
+    <chain:QualChain> "::" <name:LowerNameRule> => {
+        let (qual, prev) = chain;
+        (format!("{}::{}", qual, prev), name.name)
+    },
+    <chain:QualChain> "::" <name:UpperNameRule> => {
+        let (qual, prev) = chain;
+        (format!("{}::{}", qual, prev), name.name)
+    },
+    // Recursive parameterized: chain::<Args>::lower or chain::<Args>::Upper
+    <chain:QualChain> "::<" <_args:CommaPlus<ModuleArgInner>> ">" "::" <name:LowerNameRule> => {
+        let (qual, prev) = chain;
+        (format!("{}::{}", qual, prev), name.name)
+    },
+    <chain:QualChain> "::<" <_args:CommaPlus<ModuleArgInner>> ">" "::" <name:UpperNameRule> => {
+        let (qual, prev) = chain;
+        (format!("{}::{}", qual, prev), name.name)
+    },
+};
+
+// ─── Top-level: Source File ───────────────────────────────────────
+
+pub SourceFile: SourceFile = {
+    <l:@L> <members:ModuleMember*> <r:@R> => SourceFile {
+        members,
+        span: Span::new(l, r),
+    }
+};
+
+// ─── Module Members ──────────────────────────────────────────────
+
+ModuleMember: ModuleMember = {
+    <i:ImportDecl> => ModuleMember::Import(i),
+    <p:PredicateDecl> => ModuleMember::Predicate(p),
+    <c:ClassDecl> => ModuleMember::Class(c),
+    <m:ModuleDecl> => ModuleMember::Module(m),
+    <n:NewtypeDecl> => ModuleMember::Newtype(n),
+    <s:SelectStmt> => ModuleMember::Select(s),
+    // Bare module declaration: overlay[local?] module;
+    <l:@L> <anns:Annotation*> "module" ";" <r:@R> =>
+        ModuleMember::Module(ModuleDecl {
+            annotations: anns,
+            name: UpperName { name: String::new(), span: Span::new(l, r) },
+            type_params: vec![],
+            implements: vec![],
+            members: vec![],
+            span: Span::new(l, r),
+        }),
+    // Module-level alias: module Foo = Bar::Baz<Arg>;
+    <l:@L> <anns:Annotation*> "module" <name:UpperNameRule> "=" <target:ModuleExprRule> ";" <r:@R> =>
+        ModuleMember::ModuleAlias(ModuleAlias {
+            annotations: anns,
+            name,
+            target,
+            span: Span::new(l, r),
+        }),
+    // Predicate alias: predicate name = target/arity;
+    <l:@L> <anns:Annotation*> "predicate" <name:LowerNameRule> "=" <target:PredicateAliasTarget> "/" <arity:IntLitVal> ";" <r:@R> =>
+        ModuleMember::PredicateAlias(PredicateAlias {
+            annotations: anns,
+            name,
+            target_name: target,
+            target_arity: arity as usize,
+            span: Span::new(l, r),
+        }),
+};
+
+// ─── Imports ─────────────────────────────────────────────────────
+
+ImportDecl: Import = {
+    <l:@L> <anns:Annotation*> "import" <path:ImportPath> <alias:("as" <UpperNameRule>)?> <r:@R> => Import {
+        annotations: anns,
+        path,
+        alias,
+        span: Span::new(l, r),
+    },
+};
+
+ImportPath: QualifiedName = {
+    <l:@L> <first:AnyIdentStr> <rest:("." <AnyIdentStr>)*> <colons:("::" <AnyIdentStr>)*> <r:@R> => {
+        let mut parts = vec![first];
+        parts.extend(rest);
+        parts.extend(colons);
+        QualifiedName { parts, span: Span::new(l, r) }
+    },
+    <l:@L> <first:AnyIdentStr> <rest:("." <AnyIdentStr>)*> <colons:("::" <AnyIdentStr>)*>
+        "::<" <_args:CommaPlus<ModuleArgInner>> ">" <r:@R> => {
+        let mut parts = vec![first];
+        parts.extend(rest);
+        parts.extend(colons);
+        QualifiedName { parts, span: Span::new(l, r) }
+    },
+};
+
+// ─── Predicates ──────────────────────────────────────────────────
+
+PredicateDecl: Predicate = {
+    <l:@L> <anns:Annotation*> "predicate" <name:LowerNameRule> "(" <params:Comma<VarDeclRule>> ")" <body:PredicateBody> <r:@R> => Predicate {
+        annotations: anns,
+        head: PredicateHead {
+            result_type: None,
+            name,
+            params,
+            span: Span::new(l, r),
+        },
+        body,
+        span: Span::new(l, r),
+    },
+    <l:@L> <anns:Annotation*> <ret:TypeExprRule> <name:LowerNameRule> "(" <params:Comma<VarDeclRule>> ")" <body:PredicateBody> <r:@R> => Predicate {
+        annotations: anns,
+        head: PredicateHead {
+            result_type: Some(ret),
+            name,
+            params,
+            span: Span::new(l, r),
+        },
+        body,
+        span: Span::new(l, r),
+    },
+};
+
+PredicateBody: Option<Formula> = {
+    "{" <f:FormulaRule> "}" => Some(f),
+    ";" => None,
+    // Predicate equation: predicate name(params) = higherOrderPred(predRef/arity, ...)(args, ...)
+    "=" <_name:AnyIdentStr> "(" <_refs:Comma<PredicateRef>> ")" "(" <_args:Comma<ExprRule>> ")" => None,
+};
+
+// A predicate reference in an equation: pred/arity or Qual::pred/arity
+PredicateRef: () = {
+    <_name:AnyIdentStr> "/" <_arity:IntLitVal> => (),
+    <_chain:QualChain> "/" <_arity:IntLitVal> => (),
+};
+
+// ─── Classes ─────────────────────────────────────────────────────
+
+ClassDecl: ClassDecl = {
+    <l:@L> <anns:Annotation*> "class" <name:UpperNameRule>
+        "extends" <supers:CommaPlus<TypeExprRule>>
+        "{" <members:ClassMemberRule*> "}" <r:@R> =>
+    ClassDecl {
+        annotations: anns,
+        name,
+        supertypes: supers,
+        instanceof: vec![],
+        members,
+        span: Span::new(l, r),
+    },
+    <l:@L> <anns:Annotation*> "class" <name:UpperNameRule>
+        "extends" <supers:CommaPlus<TypeExprRule>>
+        "instanceof" <inst:CommaPlus<TypeExprRule>>
+        "{" <members:ClassMemberRule*> "}" <r:@R> =>
+    ClassDecl {
+        annotations: anns,
+        name,
+        supertypes: supers,
+        instanceof: inst,
+        members,
+        span: Span::new(l, r),
+    },
+    <l:@L> <anns:Annotation*> "class" <name:UpperNameRule>
+        "{" <members:ClassMemberRule*> "}" <r:@R> =>
+    ClassDecl {
+        annotations: anns,
+        name,
+        supertypes: vec![],
+        instanceof: vec![],
+        members,
+        span: Span::new(l, r),
+    },
+    <l:@L> <anns:Annotation*> "class" <name:UpperNameRule>
+        "instanceof" <inst:CommaPlus<TypeExprRule>>
+        "{" <members:ClassMemberRule*> "}" <r:@R> =>
+    ClassDecl {
+        annotations: anns,
+        name,
+        supertypes: vec![],
+        instanceof: inst,
+        members,
+        span: Span::new(l, r),
+    },
+    <l:@L> <anns:Annotation*> "class" <name:UpperNameRule> "=" <ty:TypeExprRule> ";" <r:@R> =>
+    ClassDecl {
+        annotations: anns,
+        name,
+        supertypes: vec![ty],
+        instanceof: vec![],
+        members: vec![],
+        span: Span::new(l, r),
+    },
+    // Type union alias: class X = A or B or C;
+    <l:@L> <anns:Annotation*> "class" <name:UpperNameRule> "=" <first:TypeExprRule> <rest:("or" <TypeExprRule>)+> ";" <r:@R> =>
+    ClassDecl {
+        annotations: anns,
+        name,
+        supertypes: { let mut v = vec![first]; v.extend(rest); v },
+        instanceof: vec![],
+        members: vec![],
+        span: Span::new(l, r),
+    },
+    // Signature class (no body): signature class Foo;
+    <l:@L> <anns:Annotation*> "class" <name:UpperNameRule> ";" <r:@R> =>
+    ClassDecl {
+        annotations: anns,
+        name,
+        supertypes: vec![],
+        instanceof: vec![],
+        members: vec![],
+        span: Span::new(l, r),
+    },
+    // Signature class with instanceof, no body: signature class Foo instanceof Bar;
+    <l:@L> <anns:Annotation*> "class" <name:UpperNameRule> "instanceof" <inst:CommaPlus<TypeExprRule>> ";" <r:@R> =>
+    ClassDecl {
+        annotations: anns,
+        name,
+        supertypes: vec![],
+        instanceof: inst,
+        members: vec![],
+        span: Span::new(l, r),
+    },
+    // Signature class with extends, no body: signature class Foo extends Bar;
+    <l:@L> <anns:Annotation*> "class" <name:UpperNameRule> "extends" <supers:CommaPlus<TypeExprRule>> ";" <r:@R> =>
+    ClassDecl {
+        annotations: anns,
+        name,
+        supertypes: supers,
+        instanceof: vec![],
+        members: vec![],
+        span: Span::new(l, r),
+    },
+};
+
+ClassMemberRule: ClassMember = {
+    <l:@L> <anns:Annotation*> <name:UpperNameRule> "(" ")" "{" <body:FormulaRule> "}" <r:@R> =>
+        ClassMember::CharacteristicPredicate {
+            annotations: anns,
+            name,
+            body,
+            span: Span::new(l, r),
+        },
+    <l:@L> <anns:Annotation*> "predicate" <name:LowerNameRule> "(" <params:Comma<VarDeclRule>> ")" <body:PredicateBody> <r:@R> =>
+        ClassMember::MemberPredicate(Predicate {
+            annotations: anns,
+            head: PredicateHead {
+                result_type: None,
+                name,
+                params,
+                span: Span::new(l, r),
+            },
+            body,
+            span: Span::new(l, r),
+        }),
+    <l:@L> <anns:Annotation*> <ret:TypeExprRule> <name:LowerNameRule> "(" <params:Comma<VarDeclRule>> ")" <body:PredicateBody> <r:@R> =>
+        ClassMember::MemberPredicate(Predicate {
+            annotations: anns,
+            head: PredicateHead {
+                result_type: Some(ret),
+                name,
+                params,
+                span: Span::new(l, r),
+            },
+            body,
+            span: Span::new(l, r),
+        }),
+    <l:@L> <anns:Annotation*> <ty:TypeExprRule> <name:LowerNameRule> ";" <r:@R> =>
+        ClassMember::Field {
+            annotations: anns.clone(),
+            ty,
+            name,
+            span: Span::new(l, r),
+        },
+};
+
+// ─── Modules ─────────────────────────────────────────────────────
+
+ModuleDecl: ModuleDecl = {
+    <l:@L> <anns:Annotation*> "module" <name:UpperNameRule>
+        "{" <members:ModuleMember*> "}" <r:@R> =>
+    ModuleDecl {
+        annotations: anns,
+        name,
+        type_params: vec![],
+        implements: vec![],
+        members,
+        span: Span::new(l, r),
+    },
+    <l:@L> <anns:Annotation*> "module" <name:UpperNameRule>
+        "implements" <impls:CommaPlus<ModuleExprRule>>
+        "{" <members:ModuleMember*> "}" <r:@R> =>
+    ModuleDecl {
+        annotations: anns,
+        name,
+        type_params: vec![],
+        implements: impls,
+        members,
+        span: Span::new(l, r),
+    },
+    <l:@L> <anns:Annotation*> "module" <name:UpperNameRule>
+        "<" <params:CommaPlus<SignatureParamRule>> ">"
+        "{" <members:ModuleMember*> "}" <r:@R> =>
+    ModuleDecl {
+        annotations: anns,
+        name,
+        type_params: params,
+        implements: vec![],
+        members,
+        span: Span::new(l, r),
+    },
+    <l:@L> <anns:Annotation*> "module" <name:UpperNameRule>
+        "<" <params:CommaPlus<SignatureParamRule>> ">"
+        "implements" <impls:CommaPlus<ModuleExprRule>>
+        "{" <members:ModuleMember*> "}" <r:@R> =>
+    ModuleDecl {
+        annotations: anns,
+        name,
+        type_params: params,
+        implements: impls,
+        members,
+        span: Span::new(l, r),
+    },
+    // Signature module (no body): signature module Foo;
+    <l:@L> <anns:Annotation*> "module" <name:UpperNameRule> ";" <r:@R> =>
+    ModuleDecl {
+        annotations: anns,
+        name,
+        type_params: vec![],
+        implements: vec![],
+        members: vec![],
+        span: Span::new(l, r),
+    },
+};
+
+// Module expression: Foo, Foo::Bar, Foo::Bar::Baz, Foo<Args>, Foo::Bar<Args>
+ModuleExprRule: ModuleExpr = {
+    // Simple: Foo
+    <l:@L> <name:UpperNameRule> <r:@R> => ModuleExpr {
+        name,
+        args: vec![],
+        span: Span::new(l, r),
+    },
+    // Qualified chain: Foo::Bar, Foo::Bar::Baz, etc.
+    <l:@L> <chain:QualChain> <r:@R> => {
+        let (qual, name) = chain;
+        let combined = format!("{}::{}", qual, name);
+        ModuleExpr {
+            name: UpperName { name: combined, span: Span::new(l, r) },
+            args: vec![],
+            span: Span::new(l, r),
+        }
+    },
+    // Parameterized: Foo::<Args> (turbofish syntax)
+    <l:@L> <name:UpperNameRule> "::<" <_args:CommaPlus<ModuleArgInner>> ">" <r:@R> => ModuleExpr {
+        name,
+        args: vec![],
+        span: Span::new(l, r),
+    },
+    // Parameterized chain: Foo::Bar::<Args>, etc. (turbofish syntax)
+    <l:@L> <chain:QualChain> "::<" <_args:CommaPlus<ModuleArgInner>> ">" <r:@R> => {
+        let (qual, name) = chain;
+        let combined = format!("{}::{}", qual, name);
+        ModuleExpr {
+            name: UpperName { name: combined, span: Span::new(l, r) },
+            args: vec![],
+            span: Span::new(l, r),
+        }
+    },
+};
+
+ModuleArgInner: () = {
+    TypeExprRule => (),
+    // Predicate reference: pred/arity or Qual::pred/arity
+    <_name:AnyIdentStr> "/" <_arity:IntLitVal> => (),
+    <_chain:QualChain> "/" <_arity:IntLitVal> => (),
+};
+
+SignatureParamRule: SignatureParam = {
+    <l:@L> <sig:UpperNameRule> <name:UpperNameRule> <r:@R> => SignatureParam {
+        sig,
+        name,
+        span: Span::new(l, r),
+    },
+    // Qualified signature: Qual::Sig Name
+    <l:@L> <chain:QualChain> <name:UpperNameRule> <r:@R> => {
+        let (_qual, sig_name) = chain;
+        SignatureParam {
+            sig: UpperName { name: sig_name, span: Span::new(l, r) },
+            name,
+            span: Span::new(l, r),
+        }
+    },
+    // Predicate signature param: predName/arity ParamName (upper or lower)
+    <l:@L> <sig_name:LowerNameRule> "/" <_arity:IntLitVal> <name:UpperNameRule> <r:@R> => SignatureParam {
+        sig: UpperName { name: sig_name.name, span: sig_name.span },
+        name,
+        span: Span::new(l, r),
+    },
+    <l:@L> <sig_name:LowerNameRule> "/" <_arity:IntLitVal> <param:LowerNameRule> <r:@R> => SignatureParam {
+        sig: UpperName { name: sig_name.name, span: sig_name.span },
+        name: UpperName { name: param.name, span: param.span },
+        span: Span::new(l, r),
+    },
+    // Qualified predicate signature param: Qual::predName/arity ParamName
+    <l:@L> <chain:QualChain> "/" <_arity:IntLitVal> <name:UpperNameRule> <r:@R> => {
+        let (_qual, sig_name) = chain;
+        SignatureParam {
+            sig: UpperName { name: sig_name, span: Span::new(l, r) },
+            name,
+            span: Span::new(l, r),
+        }
+    },
+    <l:@L> <chain:QualChain> "/" <_arity:IntLitVal> <param:LowerNameRule> <r:@R> => {
+        let (_qual, sig_name) = chain;
+        SignatureParam {
+            sig: UpperName { name: sig_name, span: Span::new(l, r) },
+            name: UpperName { name: param.name, span: param.span },
+            span: Span::new(l, r),
+        }
+    },
+};
+
+// ─── Newtypes ────────────────────────────────────────────────────
+
+NewtypeDecl: NewtypeDecl = {
+    <l:@L> <anns:Annotation*> "newtype" <name:UpperNameRule> "="
+        <first:NewtypeBranchItem> <rest:("or" <NewtypeBranchItem>)*> <r:@R> =>
+    NewtypeDecl {
+        annotations: anns,
+        name,
+        branches: { let mut v = vec![first]; v.extend(rest); v },
+        span: Span::new(l, r),
+    },
+};
+
+NewtypeBranchItem: NewtypeBranch = {
+    <l:@L> <_anns:Annotation*> <name:UpperNameRule> "(" <params:Comma<VarDeclRule>> ")" "{" <body:FormulaRule> "}" <r:@R> =>
+    NewtypeBranch {
+        name,
+        params,
+        body: Some(body),
+        span: Span::new(l, r),
+    },
+    <l:@L> <_anns:Annotation*> <name:UpperNameRule> "(" <params:Comma<VarDeclRule>> ")" <r:@R> =>
+    NewtypeBranch {
+        name,
+        params,
+        body: None,
+        span: Span::new(l, r),
+    },
+};
+
+// ─── Select (Query) ──────────────────────────────────────────────
+
+SelectStmt: Select = {
+    <l:@L> "from" <from:CommaPlus<VarDeclRule>> "where" <wh:FormulaRule> "select" <exprs:CommaPlus<SelectExprRule>> <ob:OrderByClause?> <r:@R> =>
+    Select {
+        from,
+        where_clause: Some(wh),
+        select_exprs: exprs,
+        order_by: ob.unwrap_or_default(),
+        span: Span::new(l, r),
+    },
+    <l:@L> "from" <from:CommaPlus<VarDeclRule>> "select" <exprs:CommaPlus<SelectExprRule>> <ob:OrderByClause?> <r:@R> =>
+    Select {
+        from,
+        where_clause: None,
+        select_exprs: exprs,
+        order_by: ob.unwrap_or_default(),
+        span: Span::new(l, r),
+    },
+    <l:@L> "where" <wh:FormulaRule> "select" <exprs:CommaPlus<SelectExprRule>> <ob:OrderByClause?> <r:@R> =>
+    Select {
+        from: vec![],
+        where_clause: Some(wh),
+        select_exprs: exprs,
+        order_by: ob.unwrap_or_default(),
+        span: Span::new(l, r),
+    },
+    <l:@L> "select" <exprs:CommaPlus<SelectExprRule>> <ob:OrderByClause?> <r:@R> =>
+    Select {
+        from: vec![],
+        where_clause: None,
+        select_exprs: exprs,
+        order_by: ob.unwrap_or_default(),
+        span: Span::new(l, r),
+    },
+};
+
+SelectExprRule: SelectExpr = {
+    <l:@L> <e:ExprRule> "as" <label:AnyIdentStr> <r:@R> => SelectExpr {
+        expr: e,
+        label: Some(label),
+        span: Span::new(l, r),
+    },
+    <l:@L> <e:ExprRule> <r:@R> => SelectExpr {
+        expr: e,
+        label: None,
+        span: Span::new(l, r),
+    },
+};
+
+OrderByClause: Vec<OrderByItem> = {
+    "order" "by" <items:CommaPlus<OrderByItemRule>> => items,
+};
+
+OrderByItemRule: OrderByItem = {
+    <l:@L> <name:LowerNameRule> "asc" <r:@R> => OrderByItem {
+        expr: Expr { kind: ExprKind::Variable(name.clone()), span: name.span.clone() },
+        dir: Some(SortDir::Asc), span: Span::new(l, r),
+    },
+    <l:@L> <name:LowerNameRule> "desc" <r:@R> => OrderByItem {
+        expr: Expr { kind: ExprKind::Variable(name.clone()), span: name.span.clone() },
+        dir: Some(SortDir::Desc), span: Span::new(l, r),
+    },
+    <l:@L> <name:LowerNameRule> <r:@R> => OrderByItem {
+        expr: Expr { kind: ExprKind::Variable(name.clone()), span: name.span.clone() },
+        dir: None, span: Span::new(l, r),
+    },
+};
+
+// ─── Annotations ─────────────────────────────────────────────────
+
+Annotation: Annotation = {
+    <l:@L> "abstract" <r:@R> => Annotation { kind: AnnotationKind::Abstract, span: Span::new(l, r) },
+    <l:@L> "cached" <r:@R> => Annotation { kind: AnnotationKind::Cached, span: Span::new(l, r) },
+    <l:@L> "external" <r:@R> => Annotation { kind: AnnotationKind::External, span: Span::new(l, r) },
+    <l:@L> "extensible" <r:@R> => Annotation { kind: AnnotationKind::Extensible, span: Span::new(l, r) },
+    <l:@L> "final" <r:@R> => Annotation { kind: AnnotationKind::Final, span: Span::new(l, r) },
+    <l:@L> "transient" <r:@R> => Annotation { kind: AnnotationKind::Transient, span: Span::new(l, r) },
+    <l:@L> "override" <r:@R> => Annotation { kind: AnnotationKind::Override, span: Span::new(l, r) },
+    <l:@L> "default" <r:@R> => Annotation { kind: AnnotationKind::Default, span: Span::new(l, r) },
+    <l:@L> "deprecated" <r:@R> => Annotation { kind: AnnotationKind::Deprecated, span: Span::new(l, r) },
+    <l:@L> "query" <r:@R> => Annotation { kind: AnnotationKind::Query, span: Span::new(l, r) },
+    <l:@L> "additional" <r:@R> => Annotation { kind: AnnotationKind::Additional, span: Span::new(l, r) },
+    <l:@L> "private" <r:@R> => Annotation { kind: AnnotationKind::Private, span: Span::new(l, r) },
+    <l:@L> "library" <r:@R> => Annotation { kind: AnnotationKind::Library, span: Span::new(l, r) },
+    <l:@L> "signature" <r:@R> => Annotation { kind: AnnotationKind::Signature, span: Span::new(l, r) },
+    <l:@L> "pragma" "[" <kind:PragmaKindRule> "]" <r:@R> => Annotation {
+        kind: AnnotationKind::Pragma(kind),
+        span: Span::new(l, r),
+    },
+    // Multi-pragma: pragma[noinline, nomagic] — use first pragma
+    <l:@L> "pragma" "[" <kind:PragmaKindRule> "," <_rest:CommaPlus<PragmaKindRule>> "]" <r:@R> => Annotation {
+        kind: AnnotationKind::Pragma(kind),
+        span: Span::new(l, r),
+    },
+    <l:@L> "bindingset" "[" <names:Comma<BindingsetNameRule>> "]" <r:@R> => Annotation {
+        kind: AnnotationKind::BindingSet(names),
+        span: Span::new(l, r),
+    },
+    <l:@L> "language" "[" "monotonicAggregates" "]" <r:@R> => Annotation {
+        kind: AnnotationKind::Language(LanguageFeature::MonotonicAggregates),
+        span: Span::new(l, r),
+    },
+    <l:@L> "overlay" "[" <s:LowerIdentStr> "]" <r:@R> =>? {
+        let kind = match s.as_str() {
+            "local" => OverlayKind::Local,
+            "global" => OverlayKind::Global,
+            "discard_entity" => OverlayKind::DiscardEntity,
+            _ => return Err(lalrpop_util::ParseError::User { error: LexicalError { message: format!("unknown overlay kind: {}", s) } }),
+        };
+        Ok(Annotation {
+            kind: AnnotationKind::Overlay(kind),
+            span: Span::new(l, r),
+        })
+    },
+    <l:@L> "overlay" "[" <s:LowerIdentStr> "?" "]" <r:@R> =>? {
+        let kind = match s.as_str() {
+            "local" => OverlayKind::Local,
+            "global" => OverlayKind::Global,
+            "discard_entity" => OverlayKind::DiscardEntity,
+            _ => return Err(lalrpop_util::ParseError::User { error: LexicalError { message: format!("unknown overlay kind: {}", s) } }),
+        };
+        Ok(Annotation {
+            kind: AnnotationKind::Overlay(kind),
+            span: Span::new(l, r),
+        })
+    },
+};
+
+PragmaKindRule: PragmaKind = {
+    "inline" => PragmaKind::Inline,
+    "inline_late" => PragmaKind::InlineLate,
+    "noinline" => PragmaKind::NoInline,
+    "nomagic" => PragmaKind::NoMagic,
+    "noopt" => PragmaKind::NoOpt,
+    "only_bind_out" => PragmaKind::OnlyBindOut,
+    "only_bind_into" => PragmaKind::OnlyBindInto,
+};
+
+// ─── Formulas ────────────────────────────────────────────────────
+
+FormulaRule: Formula = {
+    ImpliesFormula,
+};
+
+ImpliesFormula: Formula = {
+    <l:@L> <lhs:OrFormula> "implies" <rhs:OrFormula> <r:@R> => Formula {
+        kind: FormulaKind::Implies { lhs: Box::new(lhs), rhs: Box::new(rhs) },
+        span: Span::new(l, r),
+    },
+    OrFormula,
+};
+
+OrFormula: Formula = {
+    <l:@L> <lhs:OrFormula> "or" <rhs:AndFormula> <r:@R> => Formula {
+        kind: FormulaKind::Disjunction { lhs: Box::new(lhs), rhs: Box::new(rhs) },
+        span: Span::new(l, r),
+    },
+    AndFormula,
+};
+
+AndFormula: Formula = {
+    <l:@L> <lhs:AndFormula> "and" <rhs:UnaryFormula> <r:@R> => Formula {
+        kind: FormulaKind::Conjunction { lhs: Box::new(lhs), rhs: Box::new(rhs) },
+        span: Span::new(l, r),
+    },
+    UnaryFormula,
+};
+
+UnaryFormula: Formula = {
+    <l:@L> "not" <inner:UnaryFormula> <r:@R> => Formula {
+        kind: FormulaKind::Negation { inner: Box::new(inner) },
+        span: Span::new(l, r),
+    },
+    AtomicFormula,
+};
+
+AtomicFormula: Formula = {
+    <l:@L> "if" <cond:FormulaRule> "then" <then_:FormulaRule> "else" <else_:UnaryFormula> <r:@R> => Formula {
+        kind: FormulaKind::IfThenElse {
+            cond: Box::new(cond),
+            then: Box::new(then_),
+            else_: Box::new(else_),
+        },
+        span: Span::new(l, r),
+    },
+
+    <l:@L> <lhs:ExprRule> <op:CompOpRule> <rhs:ExprRule> <r:@R> => Formula {
+        kind: FormulaKind::Comparison { lhs, op, rhs },
+        span: Span::new(l, r),
+    },
+
+    <l:@L> <e:ExprRule> "instanceof" <ty:TypeExprRule> <r:@R> => Formula {
+        kind: FormulaKind::InstanceOf { expr: e, ty },
+        span: Span::new(l, r),
+    },
+
+    <l:@L> <e:ExprRule> "in" <range:ExprRule> <r:@R> => Formula {
+        kind: FormulaKind::InRange { expr: e, range },
+        span: Span::new(l, r),
+    },
+
+    <l:@L> "exists" "(" <vars:CommaPlus<VarDeclRule>> "|" <guard:FormulaRule> "|" <body:FormulaRule> ")" <r:@R> => Formula {
+        kind: FormulaKind::Exists { vars, guard: Some(Box::new(guard)), body: Box::new(body) },
+        span: Span::new(l, r),
+    },
+
+    <l:@L> "exists" "(" <vars:CommaPlus<VarDeclRule>> "|" <body:FormulaRule> ")" <r:@R> => Formula {
+        kind: FormulaKind::Exists { vars, guard: None, body: Box::new(body) },
+        span: Span::new(l, r),
+    },
+
+    // Short-form exists with just vars: exists(Type x) — equivalent to exists(Type x | any())
+    <l:@L> "exists" "(" <vars:CommaPlus<VarDeclRule>> ")" <r:@R> => Formula {
+        kind: FormulaKind::Exists {
+            vars, guard: None,
+            body: Box::new(Formula { kind: FormulaKind::Any, span: Span::new(l, r) }),
+        },
+        span: Span::new(l, r),
+    },
+
+    <l:@L> "exists" "(" <e:ExprRule> ")" <r:@R> => Formula {
+        kind: FormulaKind::ExistsExpr { expr: e },
+        span: Span::new(l, r),
+    },
+
+    <l:@L> "forall" "(" <vars:CommaPlus<VarDeclRule>> "|" <guard:FormulaRule> "|" <body:FormulaRule> ")" <r:@R> => Formula {
+        kind: FormulaKind::Forall {
+            vars,
+            guard: Box::new(guard),
+            body: Box::new(body),
+        },
+        span: Span::new(l, r),
+    },
+
+    // 2-section forall: forall(vars | guard) — body defaults to any()
+    <l:@L> "forall" "(" <vars:CommaPlus<VarDeclRule>> "|" <guard:FormulaRule> ")" <r:@R> => Formula {
+        kind: FormulaKind::Forall {
+            vars,
+            guard: Box::new(guard),
+            body: Box::new(Formula { kind: FormulaKind::Any, span: Span::new(l, r) }),
+        },
+        span: Span::new(l, r),
+    },
+
+    <l:@L> "forex" "(" <vars:CommaPlus<VarDeclRule>> "|" <guard:FormulaRule> "|" <body:FormulaRule> ")" <r:@R> => Formula {
+        kind: FormulaKind::Forex {
+            vars,
+            guard: Box::new(guard),
+            body: Box::new(body),
+        },
+        span: Span::new(l, r),
+    },
+
+    // 2-section forex: forex(vars | guard) — body defaults to any()
+    <l:@L> "forex" "(" <vars:CommaPlus<VarDeclRule>> "|" <guard:FormulaRule> ")" <r:@R> => Formula {
+        kind: FormulaKind::Forex {
+            vars,
+            guard: Box::new(guard),
+            body: Box::new(Formula { kind: FormulaKind::Any, span: Span::new(l, r) }),
+        },
+        span: Span::new(l, r),
+    },
+
+    <l:@L> "any" "(" ")" <r:@R> => Formula {
+        kind: FormulaKind::Any,
+        span: Span::new(l, r),
+    },
+
+    <l:@L> "none" "(" ")" <r:@R> => Formula {
+        kind: FormulaKind::None,
+        span: Span::new(l, r),
+    },
+
+    <l:@L> <e:ExprRule> <r:@R> => Formula {
+        kind: FormulaKind::ExprFormula(e),
+        span: Span::new(l, r),
+    },
+};
+
+CompOpRule: CompOp = {
+    "=" => CompOp::Eq,
+    "!=" => CompOp::Ne,
+    "<" => CompOp::Lt,
+    ">" => CompOp::Gt,
+    "<=" => CompOp::Le,
+    ">=" => CompOp::Ge,
+};
+
+// ─── Expressions ─────────────────────────────────────────────────
+
+pub ExprRule: Expr = {
+    AddExpr,
+};
+
+AddExpr: Expr = {
+    <l:@L> <first:MulExpr> <rest:AddExprTail+> <r:@R> => {
+        rest.into_iter().fold(first, |lhs, (op, rhs)| {
+            let span = Span::new(lhs.span.start, rhs.span.end);
+            Expr {
+                kind: ExprKind::BinaryOp { lhs: Box::new(lhs), op, rhs: Box::new(rhs) },
+                span,
+            }
+        })
+    },
+    MulExpr,
+};
+
+AddExprTail: (BinOp, Expr) = {
+    "+" <e:MulExpr> => (BinOp::Add, e),
+    "-" <e:MulExpr> => (BinOp::Sub, e),
+};
+
+MulExpr: Expr = {
+    <l:@L> <first:UnaryExpr> <rest:MulExprTail+> <r:@R> => {
+        rest.into_iter().fold(first, |lhs, (op, rhs)| {
+            let span = Span::new(lhs.span.start, rhs.span.end);
+            Expr {
+                kind: ExprKind::BinaryOp { lhs: Box::new(lhs), op, rhs: Box::new(rhs) },
+                span,
+            }
+        })
+    },
+    UnaryExpr,
+};
+
+MulExprTail: (BinOp, Expr) = {
+    "*" <e:UnaryExpr> => (BinOp::Mul, e),
+    "/" <e:UnaryExpr> => (BinOp::Div, e),
+    "%" <e:UnaryExpr> => (BinOp::Mod, e),
+};
+
+UnaryExpr: Expr = {
+    <l:@L> "-" <e:UnaryExpr> <r:@R> => Expr {
+        kind: ExprKind::UnaryOp { op: UnaryOp::Neg, operand: Box::new(e) },
+        span: Span::new(l, r),
+    },
+    PostfixExpr,
+};
+
+PostfixExpr: Expr = {
+    <l:@L> <recv:PostfixExpr> "." <name:LowerNameRule> "(" <args:Comma<ExprRule>> ")" <r:@R> => Expr {
+        kind: ExprKind::MemberCall {
+            receiver: Box::new(recv),
+            name,
+            closure: None,
+            args,
+        },
+        span: Span::new(l, r),
+    },
+    <l:@L> <recv:PostfixExpr> "." <name:LowerNameRule> "closure_plus" "(" <args:Comma<ExprRule>> ")" <r:@R> => Expr {
+        kind: ExprKind::MemberCall {
+            receiver: Box::new(recv),
+            name,
+            closure: Some(ClosureOp::Plus),
+            args,
+        },
+        span: Span::new(l, r),
+    },
+    <l:@L> <recv:PostfixExpr> "." <name:LowerNameRule> "closure_star" "(" <args:Comma<ExprRule>> ")" <r:@R> => Expr {
+        kind: ExprKind::MemberCall {
+            receiver: Box::new(recv),
+            name,
+            closure: Some(ClosureOp::Star),
+            args,
+        },
+        span: Span::new(l, r),
+    },
+    <l:@L> <e:PostfixExpr> "." "(" <ty:TypeExprRule> ")" <r:@R> => Expr {
+        kind: ExprKind::PostfixCast { expr: Box::new(e), ty },
+        span: Span::new(l, r),
+    },
+    PrimaryExpr,
+};
+
+PrimaryExpr: Expr = {
+    <l:@L> <n:IntLitVal> <r:@R> => Expr {
+        kind: ExprKind::Literal(Literal::Int(n)),
+        span: Span::new(l, r),
+    },
+    <l:@L> <n:FloatLitVal> <r:@R> => Expr {
+        kind: ExprKind::Literal(Literal::Float(n)),
+        span: Span::new(l, r),
+    },
+    <l:@L> <s:StringLitVal> <r:@R> => Expr {
+        kind: ExprKind::Literal(Literal::String(s)),
+        span: Span::new(l, r),
+    },
+    <l:@L> "true" <r:@R> => Expr {
+        kind: ExprKind::Literal(Literal::Bool(true)),
+        span: Span::new(l, r),
+    },
+    <l:@L> "false" <r:@R> => Expr {
+        kind: ExprKind::Literal(Literal::Bool(false)),
+        span: Span::new(l, r),
+    },
+    <l:@L> "this" <r:@R> => Expr {
+        kind: ExprKind::This,
+        span: Span::new(l, r),
+    },
+    <l:@L> "result" <r:@R> => Expr {
+        kind: ExprKind::Result,
+        span: Span::new(l, r),
+    },
+    <l:@L> "super" <r:@R> => Expr {
+        kind: ExprKind::Variable(LowerName { name: "super".to_string(), span: Span::new(l, r) }),
+        span: Span::new(l, r),
+    },
+    <l:@L> "_" <r:@R> => Expr {
+        kind: ExprKind::DontCare,
+        span: Span::new(l, r),
+    },
+    // Super member call: Type.super.method(args)
+    <l:@L> <super_type:UpperNameRule> "." "super" "." <name:LowerNameRule> "(" <args:Comma<ExprRule>> ")" <r:@R> => Expr {
+        kind: ExprKind::Super { super_type, name, args },
+        span: Span::new(l, r),
+    },
+    // Qualified super: Qual::Type.super.method(args)
+    <l:@L> <chain:QualChain> "." "super" "." <name:LowerNameRule> "(" <args:Comma<ExprRule>> ")" <r:@R> => {
+        let (_qual, type_name) = chain;
+        Expr {
+            kind: ExprKind::Super {
+                super_type: UpperName { name: type_name, span: Span::new(l, r) },
+                name,
+                args,
+            },
+            span: Span::new(l, r),
+        }
+    },
+    // Pragma expression: pragma[kind](expr) — treated as parenthesized expression
+    <l:@L> "pragma" "[" <_kind:PragmaKindRule> "]" "(" <e:ExprRule> ")" <r:@R> => Expr {
+        kind: ExprKind::Paren(Box::new(e)),
+        span: Span::new(l, r),
+    },
+    // Multi-level qualified call: A::pred(args), A::B::pred(args), A::Type(args), A::B::Type(args)
+    <l:@L> <chain:QualChain> "(" <args:Comma<ExprRule>> ")" <r:@R> => {
+        let (qualifier_str, name_str) = chain;
+        if name_str.chars().next().map_or(false, |c| c.is_uppercase()) {
+            Expr {
+                kind: ExprKind::TypeCall {
+                    qualifier: Some(UpperName { name: qualifier_str, span: Span::new(l, r) }),
+                    name: UpperName { name: name_str, span: Span::new(l, r) },
+                    args,
+                },
+                span: Span::new(l, r),
+            }
+        } else {
+            Expr {
+                kind: ExprKind::QualifiedCall {
+                    qualifier: UpperName { name: qualifier_str, span: Span::new(l, r) },
+                    name: LowerName { name: name_str, span: Span::new(l, r) },
+                    args,
+                },
+                span: Span::new(l, r),
+            }
+        }
+    },
+    // Qualified closure call: A::pred+(args), A::pred*(args)
+    <l:@L> <chain:QualChain> "closure_plus" "(" <args:Comma<ExprRule>> ")" <r:@R> => {
+        let (qualifier_str, name_str) = chain;
+        Expr {
+            kind: ExprKind::QualifiedCall {
+                qualifier: UpperName { name: qualifier_str, span: Span::new(l, r) },
+                name: LowerName { name: name_str, span: Span::new(l, r) },
+                args,
+            },
+            span: Span::new(l, r),
+        }
+    },
+    <l:@L> <chain:QualChain> "closure_star" "(" <args:Comma<ExprRule>> ")" <r:@R> => {
+        let (qualifier_str, name_str) = chain;
+        Expr {
+            kind: ExprKind::QualifiedCall {
+                qualifier: UpperName { name: qualifier_str, span: Span::new(l, r) },
+                name: LowerName { name: name_str, span: Span::new(l, r) },
+                args,
+            },
+            span: Span::new(l, r),
+        }
+    },
+    // Type/constructor call (no qualifier): TMyType(args)
+    <l:@L> <name:UpperNameRule> "(" <args:Comma<ExprRule>> ")" <r:@R> => Expr {
+        kind: ExprKind::TypeCall { qualifier: None, name, args },
+        span: Span::new(l, r),
+    },
+    // Function call: name(args)
+    <l:@L> <name:LowerNameRule> "(" <args:Comma<ExprRule>> ")" <r:@R> => Expr {
+        kind: ExprKind::Call { name, closure: None, args },
+        span: Span::new(l, r),
+    },
+    // Closure call: name+(args) — transitive closure
+    <l:@L> <name:LowerNameRule> "closure_plus" "(" <args:Comma<ExprRule>> ")" <r:@R> => Expr {
+        kind: ExprKind::Call { name, closure: Some(ClosureOp::Plus), args },
+        span: Span::new(l, r),
+    },
+    // Closure call: name*(args) — reflexive-transitive closure
+    <l:@L> <name:LowerNameRule> "closure_star" "(" <args:Comma<ExprRule>> ")" <r:@R> => Expr {
+        kind: ExprKind::Call { name, closure: Some(ClosureOp::Star), args },
+        span: Span::new(l, r),
+    },
+    // Variable reference
+    <l:@L> <name:LowerNameRule> <r:@R> => Expr {
+        kind: ExprKind::Variable(name),
+        span: Span::new(l, r),
+    },
+    // Range: [low .. high]
+    <l:@L> "[" <low:ExprRule> ".." <high:ExprRule> "]" <r:@R> => Expr {
+        kind: ExprKind::Range { low: Box::new(low), high: Box::new(high) },
+        span: Span::new(l, r),
+    },
+    // Set literal: [a, b, c] or [a, b, c,] or [a] (supports trailing comma)
+    <l:@L> "[" <first:ExprRule> "," <rest:Comma<ExprRule>> "]" <r:@R> => Expr {
+        kind: ExprKind::SetLiteral {
+            elements: { let mut v = vec![first]; v.extend(rest); v },
+        },
+        span: Span::new(l, r),
+    },
+    // Single-element set literal: [a]
+    <l:@L> "[" <e:ExprRule> "]" <r:@R> => Expr {
+        kind: ExprKind::SetLiteral {
+            elements: vec![e],
+        },
+        span: Span::new(l, r),
+    },
+    // Aggregation with separator and order by: agg(vars | guard | expr, sep order by ...)
+    <l:@L> <kind:AggKindRule> "(" <vars:CommaPlus<VarDeclRule>> "|" <guard:FormulaRule> "|" <expr:ExprRule> "," <sep:ExprRule> "order" "by" <ob:AggOrderByList> ")" <r:@R> => Expr {
+        kind: ExprKind::Aggregation {
+            kind, vars,
+            guard: Some(Box::new(guard)),
+            expr: Some(Box::new(expr)),
+            separator: Some(Box::new(sep)),
+            order_by: ob,
+        },
+        span: Span::new(l, r),
+    },
+    // Aggregation with separator: agg(vars | guard | expr, sep)
+    <l:@L> <kind:AggKindRule> "(" <vars:CommaPlus<VarDeclRule>> "|" <guard:FormulaRule> "|" <expr:ExprRule> "," <sep:ExprRule> ")" <r:@R> => Expr {
+        kind: ExprKind::Aggregation {
+            kind, vars,
+            guard: Some(Box::new(guard)),
+            expr: Some(Box::new(expr)),
+            separator: Some(Box::new(sep)),
+            order_by: vec![],
+        },
+        span: Span::new(l, r),
+    },
+    // Aggregation with order by: agg(vars | guard | expr order by ...)
+    <l:@L> <kind:AggKindRule> "(" <vars:CommaPlus<VarDeclRule>> "|" <guard:FormulaRule> "|" <expr:ExprRule> "order" "by" <ob:AggOrderByList> ")" <r:@R> => Expr {
+        kind: ExprKind::Aggregation {
+            kind, vars,
+            guard: Some(Box::new(guard)),
+            expr: Some(Box::new(expr)),
+            separator: None,
+            order_by: ob,
+        },
+        span: Span::new(l, r),
+    },
+    // Aggregation: agg(vars | guard | expr)
+    <l:@L> <kind:AggKindRule> "(" <vars:CommaPlus<VarDeclRule>> "|" <guard:FormulaRule> "|" <expr:ExprRule> ")" <r:@R> => Expr {
+        kind: ExprKind::Aggregation {
+            kind, vars,
+            guard: Some(Box::new(guard)),
+            expr: Some(Box::new(expr)),
+            separator: None,
+            order_by: vec![],
+        },
+        span: Span::new(l, r),
+    },
+    // Aggregation: agg(vars | guard)
+    <l:@L> <kind:AggKindRule> "(" <vars:CommaPlus<VarDeclRule>> "|" <guard:FormulaRule> ")" <r:@R> => Expr {
+        kind: ExprKind::Aggregation {
+            kind, vars,
+            guard: Some(Box::new(guard)),
+            expr: None,
+            separator: None,
+            order_by: vec![],
+        },
+        span: Span::new(l, r),
+    },
+    // Aggregation with empty guard: agg(vars | | expr)
+    <l:@L> <kind:AggKindRule> "(" <vars:CommaPlus<VarDeclRule>> "|" "|" <expr:ExprRule> ")" <r:@R> => Expr {
+        kind: ExprKind::Aggregation {
+            kind, vars,
+            guard: None,
+            expr: Some(Box::new(expr)),
+            separator: None,
+            order_by: vec![],
+        },
+        span: Span::new(l, r),
+    },
+    // Aggregation with empty guard + separator: agg(vars | | expr, sep)
+    <l:@L> <kind:AggKindRule> "(" <vars:CommaPlus<VarDeclRule>> "|" "|" <expr:ExprRule> "," <sep:ExprRule> ")" <r:@R> => Expr {
+        kind: ExprKind::Aggregation {
+            kind, vars,
+            guard: None,
+            expr: Some(Box::new(expr)),
+            separator: Some(Box::new(sep)),
+            order_by: vec![],
+        },
+        span: Span::new(l, r),
+    },
+    // Aggregation with empty guard + order by: agg(vars | | expr order by ...)
+    <l:@L> <kind:AggKindRule> "(" <vars:CommaPlus<VarDeclRule>> "|" "|" <expr:ExprRule> "order" "by" <ob:AggOrderByList> ")" <r:@R> => Expr {
+        kind: ExprKind::Aggregation {
+            kind, vars,
+            guard: None,
+            expr: Some(Box::new(expr)),
+            separator: None,
+            order_by: ob,
+        },
+        span: Span::new(l, r),
+    },
+    // Aggregation with empty guard + separator + order by: agg(vars | | expr, sep order by ...)
+    <l:@L> <kind:AggKindRule> "(" <vars:CommaPlus<VarDeclRule>> "|" "|" <expr:ExprRule> "," <sep:ExprRule> "order" "by" <ob:AggOrderByList> ")" <r:@R> => Expr {
+        kind: ExprKind::Aggregation {
+            kind, vars,
+            guard: None,
+            expr: Some(Box::new(expr)),
+            separator: Some(Box::new(sep)),
+            order_by: ob,
+        },
+        span: Span::new(l, r),
+    },
+    // Aggregation with empty vars + separator: agg( | | expr, sep)
+    <l:@L> <kind:AggKindRule> "(" "|" "|" <expr:ExprRule> "," <sep:ExprRule> ")" <r:@R> => Expr {
+        kind: ExprKind::Aggregation {
+            kind, vars: vec![],
+            guard: None,
+            expr: Some(Box::new(expr)),
+            separator: Some(Box::new(sep)),
+            order_by: vec![],
+        },
+        span: Span::new(l, r),
+    },
+    // Aggregation with empty vars: agg( | | expr) — e.g. unique( | | getAUse(def))
+    <l:@L> <kind:AggKindRule> "(" "|" "|" <expr:ExprRule> ")" <r:@R> => Expr {
+        kind: ExprKind::Aggregation {
+            kind, vars: vec![],
+            guard: None,
+            expr: Some(Box::new(expr)),
+            separator: None,
+            order_by: vec![],
+        },
+        span: Span::new(l, r),
+    },
+    // Aggregation with empty vars and guard: agg( | guard | expr)
+    <l:@L> <kind:AggKindRule> "(" "|" <guard:FormulaRule> "|" <expr:ExprRule> ")" <r:@R> => Expr {
+        kind: ExprKind::Aggregation {
+            kind, vars: vec![],
+            guard: Some(Box::new(guard)),
+            expr: Some(Box::new(expr)),
+            separator: None,
+            order_by: vec![],
+        },
+        span: Span::new(l, r),
+    },
+    // Aggregation with just vars, no guard: agg(Type x) — short form
+    <l:@L> <kind:AggKindRule> "(" <vars:CommaPlus<VarDeclRule>> ")" <r:@R> => Expr {
+        kind: ExprKind::Aggregation {
+            kind, vars,
+            guard: None,
+            expr: None,
+            separator: None,
+            order_by: vec![],
+        },
+        span: Span::new(l, r),
+    },
+    // Short-form aggregation with separator: agg(expr, sep) — e.g. concat(x.getName(), ",")
+    <l:@L> <kind:AggKindRule> "(" <expr:ExprRule> "," <sep:ExprRule> ")" <r:@R> => Expr {
+        kind: ExprKind::Aggregation {
+            kind, vars: vec![],
+            guard: None,
+            expr: Some(Box::new(expr)),
+            separator: Some(Box::new(sep)),
+            order_by: vec![],
+        },
+        span: Span::new(l, r),
+    },
+    // Short-form aggregation with separator + order by: agg(expr, sep order by ...)
+    <l:@L> <kind:AggKindRule> "(" <expr:ExprRule> "," <sep:ExprRule> "order" "by" <ob:AggOrderByList> ")" <r:@R> => Expr {
+        kind: ExprKind::Aggregation {
+            kind, vars: vec![],
+            guard: None,
+            expr: Some(Box::new(expr)),
+            separator: Some(Box::new(sep)),
+            order_by: ob,
+        },
+        span: Span::new(l, r),
+    },
+    // Short-form aggregation with as + order by: agg(expr as name order by ...)
+    <l:@L> <kind:AggKindRule> "(" <expr:ExprRule> "as" <_alias:LowerNameRule> "order" "by" <ob:AggOrderByList> ")" <r:@R> => Expr {
+        kind: ExprKind::Aggregation {
+            kind, vars: vec![],
+            guard: None,
+            expr: Some(Box::new(expr)),
+            separator: None,
+            order_by: ob,
+        },
+        span: Span::new(l, r),
+    },
+    // Short-form aggregation with as + sep + order by: agg(expr as name, sep order by ...)
+    <l:@L> <kind:AggKindRule> "(" <expr:ExprRule> "as" <_alias:LowerNameRule> "," <sep:ExprRule> "order" "by" <ob:AggOrderByList> ")" <r:@R> => Expr {
+        kind: ExprKind::Aggregation {
+            kind, vars: vec![],
+            guard: None,
+            expr: Some(Box::new(expr)),
+            separator: Some(Box::new(sep)),
+            order_by: ob,
+        },
+        span: Span::new(l, r),
+    },
+    // Short-form aggregation: agg(expr) — e.g. count(x), strictcount(this.getANode())
+    <l:@L> <kind:AggKindRule> "(" <expr:ExprRule> ")" <r:@R> => Expr {
+        kind: ExprKind::Aggregation {
+            kind, vars: vec![],
+            guard: None,
+            expr: Some(Box::new(expr)),
+            separator: None,
+            order_by: vec![],
+        },
+        span: Span::new(l, r),
+    },
+    // Rank expression: rank[i](vars | guard | expr order by ...)
+    <l:@L> "rank" "[" <index:ExprRule> "]" "(" <vars:CommaPlus<VarDeclRule>> "|" <guard:FormulaRule> "|" <expr:ExprRule> "order" "by" <ob:AggOrderByList> ")" <r:@R> => Expr {
+        kind: ExprKind::RankExpr {
+            index: Box::new(index),
+            vars,
+            guard: Some(Box::new(guard)),
+            expr: Box::new(expr),
+            order_by: ob,
+        },
+        span: Span::new(l, r),
+    },
+    // Rank expression with empty guard + order by: rank[i](vars | | expr order by ...)
+    <l:@L> "rank" "[" <index:ExprRule> "]" "(" <vars:CommaPlus<VarDeclRule>> "|" "|" <expr:ExprRule> "order" "by" <ob:AggOrderByList> ")" <r:@R> => Expr {
+        kind: ExprKind::RankExpr {
+            index: Box::new(index),
+            vars,
+            guard: None,
+            expr: Box::new(expr),
+            order_by: ob,
+        },
+        span: Span::new(l, r),
+    },
+    // Rank expression with empty guard: rank[i](vars | | expr)
+    <l:@L> "rank" "[" <index:ExprRule> "]" "(" <vars:CommaPlus<VarDeclRule>> "|" "|" <expr:ExprRule> ")" <r:@R> => Expr {
+        kind: ExprKind::RankExpr {
+            index: Box::new(index),
+            vars,
+            guard: None,
+            expr: Box::new(expr),
+            order_by: vec![],
+        },
+        span: Span::new(l, r),
+    },
+    // Rank expression with 2 sections: rank[i](vars | guard) — expr defaults to first variable
+    <l:@L> "rank" "[" <index:ExprRule> "]" "(" <vars:CommaPlus<VarDeclRule>> "|" <guard:FormulaRule> ")" <r:@R> => Expr {
+        kind: ExprKind::RankExpr {
+            index: Box::new(index),
+            vars: vars.clone(),
+            guard: Some(Box::new(guard)),
+            expr: Box::new(Expr {
+                kind: ExprKind::Variable(vars[0].name.clone()),
+                span: vars[0].name.span.clone(),
+            }),
+            order_by: vec![],
+        },
+        span: Span::new(l, r),
+    },
+    // Rank expression without order by: rank[i](vars | guard | expr)
+    <l:@L> "rank" "[" <index:ExprRule> "]" "(" <vars:CommaPlus<VarDeclRule>> "|" <guard:FormulaRule> "|" <expr:ExprRule> ")" <r:@R> => Expr {
+        kind: ExprKind::RankExpr {
+            index: Box::new(index),
+            vars,
+            guard: Some(Box::new(guard)),
+            expr: Box::new(expr),
+            order_by: vec![],
+        },
+        span: Span::new(l, r),
+    },
+    // any(Type v | guard | expr)
+    <l:@L> "any" "(" <vars:CommaPlus<VarDeclRule>> "|" <guard:FormulaRule> "|" <expr:ExprRule> ")" <r:@R> => Expr {
+        kind: ExprKind::AnyExpr {
+            vars,
+            guard: Some(Box::new(guard)),
+            expr: Some(Box::new(expr)),
+        },
+        span: Span::new(l, r),
+    },
+    // any(Type v | guard)
+    <l:@L> "any" "(" <vars:CommaPlus<VarDeclRule>> "|" <guard:FormulaRule> ")" <r:@R> => Expr {
+        kind: ExprKind::AnyExpr {
+            vars,
+            guard: Some(Box::new(guard)),
+            expr: None,
+        },
+        span: Span::new(l, r),
+    },
+    // any(Type v)
+    <l:@L> "any" "(" <vars:CommaPlus<VarDeclRule>> ")" <r:@R> => Expr {
+        kind: ExprKind::AnyExpr {
+            vars,
+            guard: None,
+            expr: None,
+        },
+        span: Span::new(l, r),
+    },
+    // Parenthesized expression or formula
+    <l:@L> "(" <f:FormulaRule> ")" <r:@R> => Expr {
+        kind: match f.kind {
+            FormulaKind::ExprFormula(inner) => ExprKind::Paren(Box::new(inner)),
+            _ => ExprKind::FormulaExpr(Box::new(f)),
+        },
+        span: Span::new(l, r),
+    },
+};
+
+// Aggregation order-by list (right-recursive to avoid LALR conflicts)
+AggOrderByList: Vec<OrderByItem> = {
+    <l:@L> <e:ExprRule> <r:@R> => vec![OrderByItem { expr: e, dir: None, span: Span::new(l, r) }],
+};
+
+AggKindRule: AggKind = {
+    "count" => AggKind::Count,
+    "min" => AggKind::Min,
+    "max" => AggKind::Max,
+    "avg" => AggKind::Avg,
+    "sum" => AggKind::Sum,
+    "concat" => AggKind::Concat,
+    "unique" => AggKind::Unique,
+    "strictcount" => AggKind::StrictCount,
+    "strictsum" => AggKind::StrictSum,
+    "strictconcat" => AggKind::StrictConcat,
+};
+
+// ─── Predicate Alias Target ──────────────────────────────────────
+
+PredicateAliasTarget: QualifiedName = {
+    // Simple: name
+    <l:@L> <name:LowerIdentStr> <r:@R> => QualifiedName {
+        parts: vec![name],
+        span: Span::new(l, r),
+    },
+    // Qualified: Module::name, Module::Sub::name, etc.
+    <l:@L> <chain:QualChain> <r:@R> => {
+        let (qual, name) = chain;
+        let mut parts: Vec<String> = qual.split("::").map(|s| s.to_string()).collect();
+        parts.push(name);
+        QualifiedName { parts, span: Span::new(l, r) }
+    },
+};
+
+// ─── Types ───────────────────────────────────────────────────────
+
+TypeExprRule: TypeExpr = {
+    <l:@L> "boolean" <r:@R> => TypeExpr { kind: TypeExprKind::Primitive(PrimitiveType::Boolean), span: Span::new(l, r) },
+    <l:@L> "int" <r:@R> => TypeExpr { kind: TypeExprKind::Primitive(PrimitiveType::Int), span: Span::new(l, r) },
+    <l:@L> "float" <r:@R> => TypeExpr { kind: TypeExprKind::Primitive(PrimitiveType::Float), span: Span::new(l, r) },
+    <l:@L> "string" <r:@R> => TypeExpr { kind: TypeExprKind::Primitive(PrimitiveType::String), span: Span::new(l, r) },
+    <l:@L> "date" <r:@R> => TypeExpr { kind: TypeExprKind::Primitive(PrimitiveType::Date), span: Span::new(l, r) },
+    <l:@L> "@" <name:AnyIdentStr> <r:@R> => TypeExpr { kind: TypeExprKind::Database(name), span: Span::new(l, r) },
+    // Module-qualified type chain: A::B, A::B::C, etc.
+    <l:@L> <chain:QualChain> <r:@R> => {
+        let (qual, name) = chain;
+        TypeExpr {
+            kind: TypeExprKind::ModuleAccess(
+                UpperName { name: qual, span: Span::new(l, r) },
+                UpperName { name, span: Span::new(l, r) },
+            ),
+            span: Span::new(l, r),
+        }
+    },
+    // Parameterized type: Foo::<Args> (turbofish syntax)
+    <l:@L> <name:UpperNameRule> "::<" <_args:CommaPlus<ModuleArgInner>> ">" <r:@R> => TypeExpr {
+        kind: TypeExprKind::ClassName(name), span: Span::new(l, r),
+    },
+    // Parameterized qualified type: Qual::Type::<Args>
+    <l:@L> <chain:QualChain> "::<" <_args:CommaPlus<ModuleArgInner>> ">" <r:@R> => {
+        let (qual, name) = chain;
+        TypeExpr {
+            kind: TypeExprKind::ModuleAccess(
+                UpperName { name: qual, span: Span::new(l, r) },
+                UpperName { name, span: Span::new(l, r) },
+            ),
+            span: Span::new(l, r),
+        }
+    },
+    <l:@L> <name:UpperNameRule> <r:@R> => TypeExpr { kind: TypeExprKind::ClassName(name), span: Span::new(l, r) },
+};
+
+VarDeclRule: VarDecl = {
+    <l:@L> <ty:TypeExprRule> <name:LowerNameRule> <r:@R> => VarDecl {
+        ty,
+        name,
+        span: Span::new(l, r),
+    }
+};
+
+// ─── Names and Identifiers ──────────────────────────────────────
+
+LowerNameRule: LowerName = {
+    <l:@L> <s:LowerIdentStr> <r:@R> => LowerName { name: s, span: Span::new(l, r) },
+    // Keywords that can appear as identifiers in some contexts
+    <l:@L> "signature" <r:@R> => LowerName { name: "signature".to_string(), span: Span::new(l, r) },
+    <l:@L> "order" <r:@R> => LowerName { name: "order".to_string(), span: Span::new(l, r) },
+    <l:@L> "language" <r:@R> => LowerName { name: "language".to_string(), span: Span::new(l, r) },
+    <l:@L> "implements" <r:@R> => LowerName { name: "implements".to_string(), span: Span::new(l, r) },
+    <l:@L> "query" <r:@R> => LowerName { name: "query".to_string(), span: Span::new(l, r) },
+    <l:@L> "override" <r:@R> => LowerName { name: "override".to_string(), span: Span::new(l, r) },
+    <l:@L> "default" <r:@R> => LowerName { name: "default".to_string(), span: Span::new(l, r) },
+    <l:@L> "additional" <r:@R> => LowerName { name: "additional".to_string(), span: Span::new(l, r) },
+    <l:@L> "library" <r:@R> => LowerName { name: "library".to_string(), span: Span::new(l, r) },
+    <l:@L> "private" <r:@R> => LowerName { name: "private".to_string(), span: Span::new(l, r) },
+    <l:@L> "inline" <r:@R> => LowerName { name: "inline".to_string(), span: Span::new(l, r) },
+    <l:@L> "deprecated" <r:@R> => LowerName { name: "deprecated".to_string(), span: Span::new(l, r) },
+    <l:@L> "final" <r:@R> => LowerName { name: "final".to_string(), span: Span::new(l, r) },
+    <l:@L> "external" <r:@R> => LowerName { name: "external".to_string(), span: Span::new(l, r) },
+    <l:@L> "cached" <r:@R> => LowerName { name: "cached".to_string(), span: Span::new(l, r) },
+    <l:@L> "abstract" <r:@R> => LowerName { name: "abstract".to_string(), span: Span::new(l, r) },
+    <l:@L> "transient" <r:@R> => LowerName { name: "transient".to_string(), span: Span::new(l, r) },
+    <l:@L> "pragma" <r:@R> => LowerName { name: "pragma".to_string(), span: Span::new(l, r) },
+};
+
+BindingsetNameRule: LowerName = {
+    LowerNameRule,
+    <l:@L> "this" <r:@R> => LowerName { name: "this".to_string(), span: Span::new(l, r) },
+    <l:@L> "result" <r:@R> => LowerName { name: "result".to_string(), span: Span::new(l, r) },
+};
+
+UpperNameRule: UpperName = {
+    <l:@L> <s:UpperIdentStr> <r:@R> => UpperName { name: s, span: Span::new(l, r) },
+};
+
+AnyIdentStr: String = {
+    LowerIdentStr,
+    UpperIdentStr,
+    "abstract" => "abstract".to_string(),
+    "additional" => "additional".to_string(),
+    "cached" => "cached".to_string(),
+    "default" => "default".to_string(),
+    "deprecated" => "deprecated".to_string(),
+    "external" => "external".to_string(),
+    "extensible" => "extensible".to_string(),
+    "final" => "final".to_string(),
+    "library" => "library".to_string(),
+    "order" => "order".to_string(),
+    "overlay" => "overlay".to_string(),
+    "override" => "override".to_string(),
+    "pragma" => "pragma".to_string(),
+    "private" => "private".to_string(),
+    "query" => "query".to_string(),
+    "signature" => "signature".to_string(),
+    "transient" => "transient".to_string(),
+};
+
+LowerIdentStr: String = { <s:"lower_ident"> => s };
+UpperIdentStr: String = { <s:"upper_ident"> => s };
+IntLitVal: i64 = { <n:"int_lit"> => n };
+FloatLitVal: f64 = { <n:"float_lit"> => n };
+StringLitVal: String = { <s:"string_lit"> => s };
+
+// ─── External Lexer ──────────────────────────────────────────────
+
+extern {
+    type Location = usize;
+    type Error = LexicalError;
+
+    enum Token {
+        "and" => Token::And,
+        "any" => Token::Any,
+        "as" => Token::As,
+        "asc" => Token::Asc,
+        "avg" => Token::Avg,
+        "boolean" => Token::Boolean,
+        "by" => Token::By,
+        "class" => Token::Class,
+        "concat" => Token::Concat,
+        "count" => Token::Count,
+        "date" => Token::Date,
+        "default" => Token::Default,
+        "deprecated" => Token::Deprecated,
+        "desc" => Token::Desc,
+        "else" => Token::Else,
+        "exists" => Token::Exists,
+        "extends" => Token::Extends,
+        "false" => Token::False,
+        "final" => Token::Final,
+        "float" => Token::FloatKw,
+        "forall" => Token::Forall,
+        "forex" => Token::Forex,
+        "from" => Token::From,
+        "if" => Token::If,
+        "implements" => Token::Implements,
+        "import" => Token::Import,
+        "implies" => Token::Implies,
+        "in" => Token::In,
+        "instanceof" => Token::InstanceOf,
+        "int" => Token::IntKw,
+        "language" => Token::Language,
+        "max" => Token::Max,
+        "min" => Token::Min,
+        "module" => Token::Module,
+        "newtype" => Token::Newtype,
+        "none" => Token::None_,
+        "not" => Token::Not,
+        "or" => Token::Or,
+        "order" => Token::Order,
+        "override" => Token::Override,
+        "pragma" => Token::Pragma,
+        "predicate" => Token::Predicate,
+        "private" => Token::Private,
+        "query" => Token::Query,
+        "rank" => Token::Rank,
+        "result" => Token::Result_,
+        "select" => Token::Select,
+        "signature" => Token::Signature,
+        "string" => Token::StringKw,
+        "strictconcat" => Token::StrictConcat,
+        "strictcount" => Token::StrictCount,
+        "strictsum" => Token::StrictSum,
+        "sum" => Token::Sum,
+        "super" => Token::Super,
+        "then" => Token::Then,
+        "this" => Token::This,
+        "true" => Token::True,
+        "unique" => Token::Unique,
+        "where" => Token::Where,
+        "abstract" => Token::Abstract,
+        "cached" => Token::Cached,
+        "external" => Token::External,
+        "extensible" => Token::Extensible,
+        "transient" => Token::Transient,
+        "additional" => Token::Additional,
+        "library" => Token::Library,
+        "bindingset" => Token::BindingSet,
+        "monotonicAggregates" => Token::MonotonicAggregates,
+        "inline" => Token::Inline,
+        "inline_late" => Token::InlineLate,
+        "noinline" => Token::NoInline,
+        "nomagic" => Token::NoMagic,
+        "noopt" => Token::NoOpt,
+        "only_bind_out" => Token::OnlyBindOut,
+        "only_bind_into" => Token::OnlyBindInto,
+        "overlay" => Token::Overlay,
+        "(" => Token::LParen,
+        ")" => Token::RParen,
+        "[" => Token::LBracket,
+        "]" => Token::RBracket,
+        "{" => Token::LBrace,
+        "}" => Token::RBrace,
+        "<" => Token::Lt,
+        ">" => Token::Gt,
+        "," => Token::Comma,
+        ";" => Token::Semi,
+        "." => Token::Dot,
+        ".." => Token::DotDot,
+        "::" => Token::ColonColon,
+        "::<" => Token::ColonColonLt,
+        "|" => Token::Pipe,
+        "_" => Token::Underscore,
+        "=" => Token::Eq,
+        "!=" => Token::Ne,
+        "<=" => Token::Le,
+        ">=" => Token::Ge,
+        "+" => Token::Plus,
+        "-" => Token::Minus,
+        "*" => Token::Star,
+        "/" => Token::Slash,
+        "%" => Token::Percent,
+        "@" => Token::At,
+        "?" => Token::Question,
+        "closure_plus" => Token::ClosurePlus,
+        "closure_star" => Token::ClosureStar,
+        "int_lit" => Token::IntLit(<i64>),
+        "float_lit" => Token::FloatLit(<f64>),
+        "string_lit" => Token::StringLit(<String>),
+        "lower_ident" => Token::LowerIdent(<String>),
+        "upper_ident" => Token::UpperIdent(<String>),
+    }
+}

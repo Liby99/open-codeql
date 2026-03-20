@@ -1,0 +1,14 @@
+[package]
+name = "ocql-ql-parser"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+ocql-common = { path = "../ocql-common" }
+ocql-ql-ast = { path = "../ocql-ql-ast" }
+lalrpop-util = "0.23.0"
+logos = "0.15"
+
+[build-dependencies]
+lalrpop = "0.23.0"

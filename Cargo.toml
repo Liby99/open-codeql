@@ -1,0 +1,13 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/ocql-common",
+    "crates/ocql-ql-ast",
+    "crates/ocql-ql-parser",
+    "crates/ocql-eval",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "Apache-2.0"

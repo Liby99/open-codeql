@@ -1,0 +1,8 @@
+[package]
+name = "ocql-ql-ast"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+ocql-common = { path = "../ocql-common" }

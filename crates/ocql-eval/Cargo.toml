@@ -1,0 +1,12 @@
+[package]
+name = "ocql-eval"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "ocql-eval"
+path = "src/main.rs"
+
+[dependencies]
+ocql-ql-parser = { path = "../ocql-ql-parser" }
