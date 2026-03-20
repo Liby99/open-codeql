@@ -418,8 +418,23 @@ SignatureParamRule: SignatureParam = {
         name,
         span: Span::new(l, r),
     },
+    // Parameterized signature: SigName<Args> ParamName
+    <l:@L> <sig:UpperNameRule> "<" <_args:CommaPlus<ModuleArgInner>> ">" <name:UpperNameRule> <r:@R> => SignatureParam {
+        sig,
+        name,
+        span: Span::new(l, r),
+    },
     // Qualified signature: Qual::Sig Name
     <l:@L> <chain:QualChain> <name:UpperNameRule> <r:@R> => {
+        let (_qual, sig_name) = chain;
+        SignatureParam {
+            sig: UpperName { name: sig_name, span: Span::new(l, r) },
+            name,
+            span: Span::new(l, r),
+        }
+    },
+    // Qualified parameterized signature: Qual::Sig<Args> Name
+    <l:@L> <chain:QualChain> "<" <_args:CommaPlus<ModuleArgInner>> ">" <name:UpperNameRule> <r:@R> => {
         let (_qual, sig_name) = chain;
         SignatureParam {
             sig: UpperName { name: sig_name, span: Span::new(l, r) },

@@ -132,8 +132,10 @@ pub fn analyze_single_file(source: &str, path: &str) -> HirDatabase {
 
     let empty1 = ModuleNamespaces::default();
     let empty2 = ModuleNamespaces::default();
+    let empty_project = ModuleNamespaces::default();
+    let empty_exported = HashMap::new();
     let mut resolver =
-        resolve::NameResolver::new_single_file(file_id, &collector, &empty1, &empty2);
+        resolve::NameResolver::new_single_file(file_id, &collector, &empty1, &empty2, &empty_project, &empty_exported);
     resolver.resolve_source_file(&ast);
     let name_resolution = std::mem::take(&mut resolver.name_resolutions);
     let expr_types = std::mem::take(&mut resolver.expr_types);
@@ -175,6 +177,22 @@ pub fn analyze_project(workspace_root: &Path) -> HirDatabase {
     let mut sources = SourceManager::new();
     let mut module_graph = ModuleGraph::new();
     let mut global_diags = Vec::new();
+
+    // Report discovered packs
+    let pack_names: Vec<&str> = project.pack_names().collect();
+    global_diags.push(Diagnostic {
+        severity: Severity::Warning,
+        message: format!(
+            "Discovered {} packs ({} files, {} import roots): {}",
+            project.pack_count(),
+            project.file_count(),
+            project.import_roots().len(),
+            pack_names.join(", ")
+        ),
+        span: Span::dummy(),
+        file: FileId(0),
+        notes: vec![],
+    });
 
     // Phase 1: Parse all files
     let mut parsed: HashMap<FileId, SourceFile> = HashMap::new();
@@ -328,6 +346,16 @@ pub fn analyze_project(workspace_root: &Path) -> HirDatabase {
 
     // Merge database predicates/types into builtins so they're available everywhere
     builtins.namespaces.merge_from(&db_ns);
+
+    // Phase 3c: Build project-wide type namespace as fallback.
+    // In CodeQL, files within a library can reference types from sibling files
+    // (e.g., Literal.qll uses LabelStmt from Stmt.qll without importing it)
+    // because they're always used via a hub file like cpp.qll. We build a
+    // project-wide type+predicate namespace as a last-resort fallback.
+    let mut project_ns = ModuleNamespaces::default();
+    for collector in collectors.values() {
+        project_ns.merge_from(&collector.namespaces);
+    }
 
     // Phase 4+5: Name resolution + type checking (in dependency order)
     let mut file_analyses: HashMap<FileId, FileAnalysis> = HashMap::new();
@@ -499,6 +527,8 @@ pub fn analyze_project(workspace_root: &Path) -> HirDatabase {
                 &collector.namespaces,
                 &imported,
                 &builtins.namespaces,
+                &project_ns,
+                &exported_ns,
                 collector.next_local_id(),
             );
             resolver.resolve_source_file(ast);

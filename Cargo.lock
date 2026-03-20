@@ -338,6 +338,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "ocql-engine"
+version = "0.1.0"
+dependencies = [
+ "ocql-database",
+ "ocql-extractor-common",
+ "ocql-extractor-cpp",
+ "ocql-extractor-java",
+ "ocql-schema",
+ "smallvec",
+]
+
+[[package]]
 name = "ocql-eval"
 version = "0.1.0"
 dependencies = [

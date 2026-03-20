@@ -15,10 +15,79 @@ use ocql_ql_ast::expr::Expr;
 /// Error type for parsing.
 pub type ParseError = lalrpop_util::ParseError<usize, Token, LexicalError>;
 
-/// Preprocess input: convert turbofish `::<` to `<` so the parser
-/// handles it with the existing `<` type-arg rules.
+/// Preprocess input: strip nested block comments and convert turbofish syntax.
 fn preprocess(input: &str) -> String {
-    input.replace("::<", "<")
+    let stripped = strip_block_comments(input);
+    stripped.replace("::<", "<")
+}
+
+/// Strip block comments from input, handling nesting.
+/// Replaces comment content with spaces (preserving line structure for spans).
+/// Respects string literals and line comments (does not treat `/*` inside them as comment starts).
+fn strip_block_comments(input: &str) -> String {
+    let bytes = input.as_bytes();
+    let mut result = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        // Skip string literals verbatim
+        if bytes[i] == b'"' {
+            result.push(bytes[i]);
+            i += 1;
+            while i < bytes.len() && bytes[i] != b'"' {
+                if bytes[i] == b'\\' && i + 1 < bytes.len() {
+                    result.push(bytes[i]);
+                    result.push(bytes[i + 1]);
+                    i += 2;
+                } else {
+                    result.push(bytes[i]);
+                    i += 1;
+                }
+            }
+            if i < bytes.len() {
+                result.push(bytes[i]); // closing quote
+                i += 1;
+            }
+        }
+        // Skip line comments verbatim
+        else if i + 1 < bytes.len() && bytes[i] == b'/' && bytes[i + 1] == b'/' {
+            while i < bytes.len() && bytes[i] != b'\n' {
+                result.push(bytes[i]);
+                i += 1;
+            }
+        }
+        // Strip block comments
+        else if i + 1 < bytes.len() && bytes[i] == b'/' && bytes[i + 1] == b'*' {
+            let mut depth = 1;
+            result.push(b' ');
+            result.push(b' ');
+            i += 2;
+            while i < bytes.len() && depth > 0 {
+                if i + 1 < bytes.len() && bytes[i] == b'/' && bytes[i + 1] == b'*' {
+                    depth += 1;
+                    result.push(b' ');
+                    result.push(b' ');
+                    i += 2;
+                } else if i + 1 < bytes.len() && bytes[i] == b'*' && bytes[i + 1] == b'/' {
+                    depth -= 1;
+                    result.push(b' ');
+                    result.push(b' ');
+                    i += 2;
+                } else {
+                    if bytes[i] == b'\n' {
+                        result.push(b'\n');
+                    } else {
+                        result.push(b' ');
+                    }
+                    i += 1;
+                }
+            }
+        } else {
+            result.push(bytes[i]);
+            i += 1;
+        }
+    }
+    // SAFETY: we only replaced non-newline bytes with spaces, preserving UTF-8 structure
+    String::from_utf8(result).unwrap_or_else(|_| input.to_string())
 }
 
 /// Parse a QL source file (query module or library module).

@@ -8,3 +8,8 @@ license.workspace = true
 ocql-database = { path = "../ocql-database" }
 ocql-schema = { path = "../ocql-schema" }
 smallvec = "1"
+
+[dev-dependencies]
+ocql-extractor-common = { path = "../ocql-extractor-common" }
+ocql-extractor-cpp = { path = "../ocql-extractor-cpp" }
+ocql-extractor-java = { path = "../ocql-extractor-java" }

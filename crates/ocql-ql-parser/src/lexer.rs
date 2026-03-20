@@ -18,7 +18,6 @@ impl std::error::Error for LexicalError {}
 #[derive(Logos, Debug, Clone, PartialEq)]
 #[logos(skip r"[ \t\r\n\f]+")]
 #[logos(skip r"//[^\n]*")]
-#[logos(skip r"/\*([^*]|\*[^/])*\*/")]
 #[logos(error = LexicalError)]
 pub enum Token {
     // ── Keywords ──────────────────────────────────────────
@@ -388,7 +387,9 @@ mod tests {
 
     #[test]
     fn test_lex_qldoc_backtick() {
-        let input = "/** Gets `delta`. */\npredicate test() { 1 = 1 }";
+        // Block comments are now stripped by preprocessing (strip_block_comments)
+        // before reaching the lexer. Test with pre-stripped input.
+        let input = "                    \npredicate test() { 1 = 1 }";
         let lexer = Lexer::new(input);
         let tokens: Result<Vec<_>, _> = lexer.collect();
         assert!(tokens.is_ok(), "Lex error: {:?}", tokens.err());
@@ -404,7 +405,8 @@ mod tests {
 
     #[test]
     fn test_lex_comments_skipped() {
-        let input = "// this is a comment\nfrom int x /* block */ select x";
+        // Line comments handled by lexer, block comments by preprocessor
+        let input = "// this is a comment\nfrom int x select x";
         let lexer = Lexer::new(input);
         let tokens: Vec<_> = lexer.collect::<Result<Vec<_>, _>>().unwrap();
         assert!(matches!(tokens[0].1, Token::From));

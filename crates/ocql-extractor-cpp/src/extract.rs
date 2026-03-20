@@ -479,12 +479,28 @@ fn find_params_list<'a>(node: &Node<'a>) -> Option<Node<'a>> {
 fn extract_declarator_name(node: &Node<'_>, source: &[u8]) -> String {
     match node.kind() {
         "identifier" | "field_identifier" => node.text(source).to_string(),
-        "pointer_declarator" | "reference_declarator" | "array_declarator" => {
+        "pointer_declarator" | "reference_declarator" | "array_declarator"
+        | "function_declarator" => {
             if let Some(decl) = node.child_by_field("declarator") {
                 extract_declarator_name(&decl, source)
             } else {
                 String::new()
             }
+        }
+        "parenthesized_declarator" => {
+            // `(* name)` — inner declarator is a positional child (no field name).
+            // Walk children and recurse on the first non-punctuation node.
+            let mut cursor = node.walk();
+            if cursor.goto_first_child() {
+                loop {
+                    let child = cursor.node();
+                    if child.kind() != "(" && child.kind() != ")" {
+                        return extract_declarator_name(&child, source);
+                    }
+                    if !cursor.goto_next_sibling() { break; }
+                }
+            }
+            String::new()
         }
         _ => {
             // Try the declarator field first, then text
@@ -1321,20 +1337,28 @@ fn extract_stmt(
                     ]);
                 }
             }
-            // else branch
+            // else branch — tree-sitter wraps it in an `else_clause` node
             if let Some(alternative) = node.child_by_field("alternative") {
-                if let Some(else_id) = extract_stmt_or_expr_child(
-                    emitter, file_id, &alternative, source, enclosing_func,
-                ) {
-                    emitter.emit("if_else", vec![
-                        Value::Entity(stmt_id),
-                        Value::Entity(else_id),
-                    ]);
-                    emitter.emit("stmtparents", vec![
-                        Value::Entity(else_id),
-                        Value::Int(1),
-                        Value::Entity(stmt_id),
-                    ]);
+                // Unwrap else_clause to get the actual body (compound_statement or if_statement)
+                let else_body = if alternative.kind() == "else_clause" {
+                    alternative.named_children_iter().next()
+                } else {
+                    Some(alternative)
+                };
+                if let Some(else_body) = else_body {
+                    if let Some(else_id) = extract_stmt_or_expr_child(
+                        emitter, file_id, &else_body, source, enclosing_func,
+                    ) {
+                        emitter.emit("if_else", vec![
+                            Value::Entity(stmt_id),
+                            Value::Entity(else_id),
+                        ]);
+                        emitter.emit("stmtparents", vec![
+                            Value::Entity(else_id),
+                            Value::Int(1),
+                            Value::Entity(stmt_id),
+                        ]);
+                    }
                 }
             }
         }
@@ -1604,8 +1628,8 @@ fn extract_expr(
         Value::Entity(enclosing_func),
     ]);
 
-    // Literal value text
-    if expr_kind == EXPR_LITERAL {
+    // Value text: literal values and identifier names
+    if expr_kind == EXPR_LITERAL || expr_kind == EXPR_VARACCESS || expr_kind == EXPR_FIELD_ACCESS {
         let text = node.text(source);
         let text_val = emitter.string(text);
         emitter.emit("valuetext", vec![
@@ -2163,6 +2187,55 @@ mod tests {
         }).collect();
         eprintln!("Global variables: {:?}", names);
         assert!(names.contains(&"global_var"), "Should find 'global_var' in globalvariables table");
+    }
+
+    #[test]
+    fn test_if_else_extraction() {
+        let source = b"int f(int x) { if (x > 0) { x = 1; } else { x = 2; } return x; }";
+        let schema = cpp_schema();
+        let mut db = Database::from_schema(schema);
+        let extractor = CppExtractor::c();
+        let result = extractor.extract_source(&mut db, "test.c", source);
+        assert!(result.success);
+
+        let if_then: Vec<_> = db.scan("if_then").unwrap().collect();
+        let if_else: Vec<_> = db.scan("if_else").unwrap().collect();
+        eprintln!("if_then rows: {}", if_then.len());
+        eprintln!("if_else rows: {}", if_else.len());
+
+        // Debug: dump all stmts to see if the if statement is extracted
+        let stmts: Vec<_> = db.scan("stmts").unwrap().collect();
+        for s in &stmts {
+            eprintln!("  stmt: id={:?} kind={}", s[0], s[1].as_int().unwrap());
+        }
+
+        // Also debug: parse the tree and check fields
+        let mut parser = tree_sitter::Parser::new();
+        let lang: tree_sitter::Language = tree_sitter_c::LANGUAGE.into();
+        parser.set_language(&lang).unwrap();
+        let tree = parser.parse(source, None).unwrap();
+        fn dump(node: &tree_sitter::Node, source: &[u8], depth: usize) {
+            let pad = " ".repeat(depth * 2);
+            let text: String = node.utf8_text(source).unwrap_or("").chars().take(50).collect();
+            let text = text.replace('\n', "\\n");
+            eprintln!("{}  {} [named={}] \"{}\"", pad, node.kind(), node.is_named(), text);
+            // Show field names
+            let mut cursor = node.walk();
+            if cursor.goto_first_child() {
+                loop {
+                    let child = cursor.node();
+                    if let Some(fname) = cursor.field_name() {
+                        eprintln!("{}    field={}", pad, fname);
+                    }
+                    dump(&child, source, depth + 1);
+                    if !cursor.goto_next_sibling() { break; }
+                }
+            }
+        }
+        dump(&tree.root_node(), source, 0);
+
+        assert_eq!(if_then.len(), 1, "Should have 1 if_then entry");
+        assert_eq!(if_else.len(), 1, "Should have 1 if_else entry");
     }
 
     #[test]

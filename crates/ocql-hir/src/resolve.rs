@@ -7,6 +7,8 @@ use ocql_ql_ast::query::Select;
 use ocql_ql_ast::ty::{PrimitiveType, TypeExpr, TypeExprKind};
 use ocql_ql_ast::{BinOp, CompOp, Literal};
 
+use std::collections::HashMap;
+
 use crate::collect::DeclarationCollector;
 use crate::def::{DefId, FileId, LocalDefId};
 use crate::diagnostics::{Diagnostic, Severity};
@@ -66,6 +68,10 @@ pub struct NameResolver<'a> {
     imported_ns: &'a ModuleNamespaces,
     /// Builtin namespaces (string methods, etc.)
     builtin_ns: &'a ModuleNamespaces,
+    /// Project-wide type/predicate namespace (last-resort fallback).
+    project_ns: &'a ModuleNamespaces,
+    /// All files' exported namespaces (for module-qualified type access).
+    exported_ns: &'a HashMap<FileId, ModuleNamespaces>,
     scopes: Vec<Scope>,
     next_local: u32,
     /// Whether we're currently inside a class member predicate or characteristic predicate.
@@ -82,6 +88,8 @@ impl<'a> NameResolver<'a> {
         local_ns: &'a ModuleNamespaces,
         imported_ns: &'a ModuleNamespaces,
         builtin_ns: &'a ModuleNamespaces,
+        project_ns: &'a ModuleNamespaces,
+        exported_ns: &'a HashMap<FileId, ModuleNamespaces>,
         next_local_id: u32,
     ) -> Self {
         Self {
@@ -89,6 +97,8 @@ impl<'a> NameResolver<'a> {
             local_ns,
             imported_ns,
             builtin_ns,
+            project_ns,
+            exported_ns,
             scopes: Vec::new(),
             next_local: next_local_id,
             in_class_context: false,
@@ -104,12 +114,16 @@ impl<'a> NameResolver<'a> {
         collector: &'a DeclarationCollector,
         empty1: &'a ModuleNamespaces,
         empty2: &'a ModuleNamespaces,
+        empty_project: &'a ModuleNamespaces,
+        empty_exported: &'a HashMap<FileId, ModuleNamespaces>,
     ) -> Self {
         Self::new(
             file_id,
             &collector.namespaces,
             empty1,
             empty2,
+            empty_project,
+            empty_exported,
             collector.next_local_id(),
         )
     }
@@ -149,17 +163,18 @@ impl<'a> NameResolver<'a> {
         None
     }
 
-    /// Look up a type by name: local → imported → builtin
+    /// Look up a type by name: local → imported → builtin → project
     fn lookup_type(&self, name: &str) -> Option<DefId> {
         self.local_ns
             .types
             .get(name)
             .or_else(|| self.imported_ns.types.get(name))
             .or_else(|| self.builtin_ns.types.get(name))
+            .or_else(|| self.project_ns.types.get(name))
             .copied()
     }
 
-    /// Look up a predicate by (name, arity): local → imported → builtin
+    /// Look up a predicate by (name, arity): local → imported → builtin → project
     fn lookup_predicate(&self, name: &str, arity: usize) -> Option<&PredicateInfo> {
         let key = (name.to_string(), arity);
         self.local_ns
@@ -167,15 +182,17 @@ impl<'a> NameResolver<'a> {
             .get(&key)
             .or_else(|| self.imported_ns.predicates.get(&key))
             .or_else(|| self.builtin_ns.predicates.get(&key))
+            .or_else(|| self.project_ns.predicates.get(&key))
     }
 
-    /// Look up a module by name.
+    /// Look up a module by name: local → imported → builtin → project
     fn lookup_module(&self, name: &str) -> Option<DefId> {
         self.local_ns
             .modules
             .get(name)
             .or_else(|| self.imported_ns.modules.get(name))
             .or_else(|| self.builtin_ns.modules.get(name))
+            .or_else(|| self.project_ns.modules.get(name))
             .copied()
     }
 
@@ -361,13 +378,24 @@ impl<'a> NameResolver<'a> {
                     Type::Error
                 }
             }
-            TypeExprKind::ModuleAccess(module, _ty) => {
+            TypeExprKind::ModuleAccess(module, ty_name) => {
                 // Module-qualified type access (e.g., Module::Type).
-                // We resolve the module to suppress "undefined module" errors,
-                // but full type resolution within modules is not yet implemented.
-                let _ = self.lookup_module(&module.name);
-                // TODO: look up ty in module's exported namespace
-                Type::Error
+                if let Some(mod_def) = self.lookup_module(&module.name) {
+                    self.name_resolutions
+                        .push((module.span, ResolvedRef::Def(mod_def)));
+                    // Look up the type in the module's exported namespace
+                    if let Some(mod_ns) = self.exported_ns.get(&mod_def.file) {
+                        if let Some(&type_def) = mod_ns.types.get(ty_name.name.as_str()) {
+                            self.name_resolutions
+                                .push((ty_name.span, ResolvedRef::Def(type_def)));
+                            return Type::Class(type_def);
+                        }
+                    }
+                    // Couldn't resolve the type within the module
+                    Type::Error
+                } else {
+                    Type::Error
+                }
             }
         }
     }
