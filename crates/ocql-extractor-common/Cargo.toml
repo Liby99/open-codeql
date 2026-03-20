@@ -1,0 +1,10 @@
+[package]
+name = "ocql-extractor-common"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+ocql-database = { path = "../ocql-database" }
+ocql-schema = { path = "../ocql-schema" }
+tree-sitter = "0.26"

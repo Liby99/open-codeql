@@ -7,6 +7,9 @@ members = [
     "crates/ocql-eval",
     "crates/ocql-schema",
     "crates/ocql-database",
+    "crates/ocql-extractor-common",
+    "crates/ocql-extractor-cpp",
+    "crates/ocql-hir",
 ]
 
 [workspace.package]

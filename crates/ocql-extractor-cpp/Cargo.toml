@@ -1,0 +1,13 @@
+[package]
+name = "ocql-extractor-cpp"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+ocql-database = { path = "../ocql-database" }
+ocql-schema = { path = "../ocql-schema" }
+ocql-extractor-common = { path = "../ocql-extractor-common" }
+tree-sitter = "0.26"
+tree-sitter-cpp = "0.23"
+tree-sitter-c = "0.24"

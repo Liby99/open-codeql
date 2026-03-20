@@ -1,0 +1,11 @@
+[package]
+name = "ocql-hir"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+ocql-common = { path = "../ocql-common" }
+ocql-ql-ast = { path = "../ocql-ql-ast" }
+ocql-ql-parser = { path = "../ocql-ql-parser" }
+ocql-schema = { path = "../ocql-schema" }
