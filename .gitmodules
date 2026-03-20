@@ -1,3 +1,33 @@
 [submodule "vendor/codeql"]
 	path = vendor/codeql
 	url = https://github.com/github/codeql.git
+[submodule "vendor/test-repos/qoi"]
+	path = vendor/test-repos/qoi
+	url = https://github.com/phoboslab/qoi.git
+[submodule "vendor/test-repos/rax"]
+	path = vendor/test-repos/rax
+	url = https://github.com/antirez/rax.git
+[submodule "vendor/test-repos/utf8.h"]
+	path = vendor/test-repos/utf8.h
+	url = https://github.com/sheredom/utf8.h.git
+[submodule "vendor/test-repos/lua-cjson"]
+	path = vendor/test-repos/lua-cjson
+	url = https://github.com/mpx/lua-cjson.git
+[submodule "vendor/test-repos/dperf"]
+	path = vendor/test-repos/dperf
+	url = https://github.com/baidu/dperf.git
+[submodule "vendor/test-repos/gson"]
+	path = vendor/test-repos/gson
+	url = https://github.com/google/gson.git
+[submodule "vendor/test-repos/jsoup"]
+	path = vendor/test-repos/jsoup
+	url = https://github.com/jhy/jsoup.git
+[submodule "vendor/test-repos/GsonFactory"]
+	path = vendor/test-repos/GsonFactory
+	url = https://github.com/getActivity/GsonFactory.git
+[submodule "vendor/test-repos/auto-value-gson"]
+	path = vendor/test-repos/auto-value-gson
+	url = https://github.com/rharter/auto-value-gson.git
+[submodule "vendor/test-repos/auto-value-moshi"]
+	path = vendor/test-repos/auto-value-moshi
+	url = https://github.com/rharter/auto-value-moshi.git

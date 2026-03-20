@@ -19,6 +19,27 @@ pub struct ModuleNamespaces {
     pub modules: HashMap<String, DefId>,
 }
 
+impl ModuleNamespaces {
+    /// Empty namespaces (same as Default, for convenience).
+    pub fn empty() -> Self {
+        Self::default()
+    }
+
+    /// Merge another namespace into this one (for import resolution).
+    /// Existing entries are NOT overwritten (local declarations take priority).
+    pub fn merge_from(&mut self, other: &ModuleNamespaces) {
+        for (k, v) in &other.types {
+            self.types.entry(k.clone()).or_insert(*v);
+        }
+        for (k, v) in &other.predicates {
+            self.predicates.entry(k.clone()).or_insert_with(|| v.clone());
+        }
+        for (k, v) in &other.modules {
+            self.modules.entry(k.clone()).or_insert(*v);
+        }
+    }
+}
+
 /// Information about a predicate needed during name resolution.
 #[derive(Clone, Debug)]
 pub struct PredicateInfo {

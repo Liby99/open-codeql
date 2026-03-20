@@ -3,6 +3,7 @@ use std::path::Path;
 use ocql_database::Database;
 
 use crate::FactEmitter;
+use crate::source_roots::{BuildSystem, SourceRoot, discover_source_roots};
 
 /// Result of extracting a single file.
 #[derive(Debug)]
@@ -104,6 +105,45 @@ pub trait Extractor {
 
         results
     }
+
+    /// Extract a project with build-system-aware source root discovery.
+    ///
+    /// Detects Gradle/Maven project structure and extracts from the appropriate
+    /// source roots (e.g., `src/main/java`, `src/test/java`).
+    ///
+    /// Returns the detected build system, discovered source roots, and extraction results.
+    fn extract_project(
+        &self,
+        db: &mut Database,
+        project_dir: &Path,
+        include_tests: bool,
+    ) -> ProjectExtractionResult {
+        let (build_system, source_roots) = discover_source_roots(project_dir);
+
+        let mut results = Vec::new();
+        let active_roots: Vec<&SourceRoot> = source_roots.iter()
+            .filter(|r| include_tests || !r.is_test)
+            .collect();
+
+        for root in &active_roots {
+            let dir_results = self.extract_directory(db, &root.path);
+            results.extend(dir_results);
+        }
+
+        ProjectExtractionResult {
+            build_system,
+            source_roots,
+            results,
+        }
+    }
+}
+
+/// Result of extracting an entire project.
+#[derive(Debug)]
+pub struct ProjectExtractionResult {
+    pub build_system: BuildSystem,
+    pub source_roots: Vec<SourceRoot>,
+    pub results: Vec<ExtractionResult>,
 }
 
 /// Simple recursive directory walker (avoids adding walkdir as dependency).

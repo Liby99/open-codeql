@@ -366,6 +366,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "ocql-extractor-java"
+version = "0.1.0"
+dependencies = [
+ "ocql-database",
+ "ocql-extractor-common",
+ "ocql-schema",
+ "tree-sitter",
+ "tree-sitter-java",
+]
+
+[[package]]
 name = "ocql-hir"
 version = "0.1.0"
 dependencies = [
@@ -373,6 +384,13 @@ dependencies = [
  "ocql-ql-ast",
  "ocql-ql-parser",
  "ocql-schema",
+]
+
+[[package]]
+name = "ocql-hir-eval"
+version = "0.1.0"
+dependencies = [
+ "ocql-hir",
 ]
 
 [[package]]
@@ -685,6 +703,16 @@ name = "tree-sitter-cpp"
 version = "0.23.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "df2196ea9d47b4ab4a31b9297eaa5a5d19a0b121dceb9f118f6790ad0ab94743"
+dependencies = [
+ "cc",
+ "tree-sitter-language",
+]
+
+[[package]]
+name = "tree-sitter-java"
+version = "0.23.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0aa6cbcdc8c679b214e616fd3300da67da0e492e066df01bcf5a5921a71e90d6"
 dependencies = [
  "cc",
  "tree-sitter-language",

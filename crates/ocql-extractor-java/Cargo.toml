@@ -1,5 +1,5 @@
 [package]
-name = "ocql-extractor-cpp"
+name = "ocql-extractor-java"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -9,9 +9,8 @@ ocql-database = { path = "../ocql-database" }
 ocql-schema = { path = "../ocql-schema" }
 ocql-extractor-common = { path = "../ocql-extractor-common" }
 tree-sitter = "0.26"
-tree-sitter-cpp = "0.23"
-tree-sitter-c = "0.24"
+tree-sitter-java = "0.23"
 
 [[bin]]
-name = "extract-cpp"
+name = "extract-java"
 path = "src/bin/extract.rs"

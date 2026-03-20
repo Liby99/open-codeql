@@ -1,0 +1,12 @@
+[package]
+name = "ocql-hir-eval"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "ocql-hir-eval"
+path = "src/main.rs"
+
+[dependencies]
+ocql-hir = { path = "../ocql-hir" }
