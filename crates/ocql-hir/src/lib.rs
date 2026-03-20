@@ -1,4 +1,5 @@
 pub mod builtins;
+pub mod class_hierarchy;
 pub mod collect;
 pub mod def;
 pub mod diagnostics;
@@ -18,11 +19,12 @@ pub use types::Type;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
+use class_hierarchy::{ClassHierarchy, ClassInfo};
 use collect::DeclarationCollector;
 use module_graph::{ImportEdge, ModuleGraph, UnresolvedImport};
 use namespace::PredicateInfo;
 use ocql_common::Span;
-use ocql_ql_ast::module::SourceFile;
+use ocql_ql_ast::module::{ClassMember, SourceFile};
 use project::ProjectIndex;
 use source::SourceManager;
 
