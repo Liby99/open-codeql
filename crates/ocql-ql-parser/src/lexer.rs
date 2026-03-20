@@ -206,8 +206,6 @@ pub enum Token {
     DotDot,
     #[token("::")]
     ColonColon,
-    #[token("::<")]
-    ColonColonLt,
     #[token("|")]
     Pipe,
     #[token("_")]

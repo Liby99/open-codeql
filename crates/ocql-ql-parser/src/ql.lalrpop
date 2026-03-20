@@ -30,32 +30,30 @@ CommaPlus<T>: Vec<T> = {
 // Returns (qualifier_string, final_name_string).
 // Right-recursive to avoid LALR shift-reduce conflicts.
 
-// Left-recursive qualified :: chain. Returns (qualifier_string, final_name_string).
-// Examples: A::b → ("A", "b"), A::B::c → ("A::B", "c"), A::<T>::b → ("A", "b")
 QualChain: (String, String) = {
-    // Base: Upper::lower or Upper::Upper
-    <first:UpperNameRule> "::" <name:LowerNameRule> => (first.name, name.name),
-    <first:UpperNameRule> "::" <name:UpperNameRule> => (first.name, name.name),
-    // Parameterized base: Upper::<Args>::lower or Upper::<Args>::Upper
-    <first:UpperNameRule> "::<" <_args:CommaPlus<ModuleArgInner>> ">" "::" <name:LowerNameRule> => (first.name, name.name),
-    <first:UpperNameRule> "::<" <_args:CommaPlus<ModuleArgInner>> ">" "::" <name:UpperNameRule> => (first.name, name.name),
-    // Recursive: chain::lower or chain::Upper
-    <chain:QualChain> "::" <name:LowerNameRule> => {
-        let (qual, prev) = chain;
-        (format!("{}::{}", qual, prev), name.name)
+    <first:UpperNameRule> "::" <rest:QualChainTail> => {
+        let (mid, final_name) = rest;
+        let qual = if mid.is_empty() { first.name.clone() } else { format!("{}::{}", first.name, mid) };
+        (qual, final_name)
     },
-    <chain:QualChain> "::" <name:UpperNameRule> => {
-        let (qual, prev) = chain;
-        (format!("{}::{}", qual, prev), name.name)
+    // Parameterized first segment: Upper<Args> :: rest
+    <first:UpperNameRule> "<" <_args:CommaPlus<ModuleArgInner>> ">" "::" <rest:QualChainTail> => {
+        let (mid, final_name) = rest;
+        let qual = if mid.is_empty() { first.name.clone() } else { format!("{}::{}", first.name, mid) };
+        (qual, final_name)
     },
-    // Recursive parameterized: chain::<Args>::lower or chain::<Args>::Upper
-    <chain:QualChain> "::<" <_args:CommaPlus<ModuleArgInner>> ">" "::" <name:LowerNameRule> => {
-        let (qual, prev) = chain;
-        (format!("{}::{}", qual, prev), name.name)
-    },
-    <chain:QualChain> "::<" <_args:CommaPlus<ModuleArgInner>> ">" "::" <name:UpperNameRule> => {
-        let (qual, prev) = chain;
-        (format!("{}::{}", qual, prev), name.name)
+};
+
+QualChainTail: (String, String) = {
+    <name:LowerNameRule> => (String::new(), name.name),
+    <name:UpperNameRule> => (String::new(), name.name),
+    <seg:UpperNameRule> "::" <rest:QualChainTail> => {
+        let (mid, final_name) = rest;
+        if mid.is_empty() {
+            (seg.name, final_name)
+        } else {
+            (format!("{}::{}", seg.name, mid), final_name)
+        }
     },
 };
 
@@ -125,7 +123,7 @@ ImportPath: QualifiedName = {
         QualifiedName { parts, span: Span::new(l, r) }
     },
     <l:@L> <first:AnyIdentStr> <rest:("." <AnyIdentStr>)*> <colons:("::" <AnyIdentStr>)*>
-        "::<" <_args:CommaPlus<ModuleArgInner>> ">" <r:@R> => {
+        "<" <_args:CommaPlus<ModuleArgInner>> ">" <r:@R> => {
         let mut parts = vec![first];
         parts.extend(rest);
         parts.extend(colons);
@@ -389,14 +387,14 @@ ModuleExprRule: ModuleExpr = {
             span: Span::new(l, r),
         }
     },
-    // Parameterized: Foo::<Args> (turbofish syntax)
-    <l:@L> <name:UpperNameRule> "::<" <_args:CommaPlus<ModuleArgInner>> ">" <r:@R> => ModuleExpr {
+    // Parameterized: Foo<Args>
+    <l:@L> <name:UpperNameRule> "<" <_args:CommaPlus<ModuleArgInner>> ">" <r:@R> => ModuleExpr {
         name,
         args: vec![],
         span: Span::new(l, r),
     },
-    // Parameterized chain: Foo::Bar::<Args>, etc. (turbofish syntax)
-    <l:@L> <chain:QualChain> "::<" <_args:CommaPlus<ModuleArgInner>> ">" <r:@R> => {
+    // Parameterized chain: Foo::Bar<Args>, etc.
+    <l:@L> <chain:QualChain> "<" <_args:CommaPlus<ModuleArgInner>> ">" <r:@R> => {
         let (qual, name) = chain;
         let combined = format!("{}::{}", qual, name);
         ModuleExpr {
@@ -1309,6 +1307,20 @@ PrimaryExpr: Expr = {
 // Aggregation order-by list (right-recursive to avoid LALR conflicts)
 AggOrderByList: Vec<OrderByItem> = {
     <l:@L> <e:ExprRule> <r:@R> => vec![OrderByItem { expr: e, dir: None, span: Span::new(l, r) }],
+    <l:@L> <e:ExprRule> "asc" <r:@R> => vec![OrderByItem { expr: e, dir: Some(SortDir::Asc), span: Span::new(l, r) }],
+    <l:@L> <e:ExprRule> "desc" <r:@R> => vec![OrderByItem { expr: e, dir: Some(SortDir::Desc), span: Span::new(l, r) }],
+    <l:@L> <e:ExprRule> <r:@R> "," <mut rest:AggOrderByList> => {
+        rest.insert(0, OrderByItem { expr: e, dir: None, span: Span::new(l, r) });
+        rest
+    },
+    <l:@L> <e:ExprRule> "asc" <r:@R> "," <mut rest:AggOrderByList> => {
+        rest.insert(0, OrderByItem { expr: e, dir: Some(SortDir::Asc), span: Span::new(l, r) });
+        rest
+    },
+    <l:@L> <e:ExprRule> "desc" <r:@R> "," <mut rest:AggOrderByList> => {
+        rest.insert(0, OrderByItem { expr: e, dir: Some(SortDir::Desc), span: Span::new(l, r) });
+        rest
+    },
 };
 
 AggKindRule: AggKind = {
@@ -1352,21 +1364,6 @@ TypeExprRule: TypeExpr = {
     <l:@L> "@" <name:AnyIdentStr> <r:@R> => TypeExpr { kind: TypeExprKind::Database(name), span: Span::new(l, r) },
     // Module-qualified type chain: A::B, A::B::C, etc.
     <l:@L> <chain:QualChain> <r:@R> => {
-        let (qual, name) = chain;
-        TypeExpr {
-            kind: TypeExprKind::ModuleAccess(
-                UpperName { name: qual, span: Span::new(l, r) },
-                UpperName { name, span: Span::new(l, r) },
-            ),
-            span: Span::new(l, r),
-        }
-    },
-    // Parameterized type: Foo::<Args> (turbofish syntax)
-    <l:@L> <name:UpperNameRule> "::<" <_args:CommaPlus<ModuleArgInner>> ">" <r:@R> => TypeExpr {
-        kind: TypeExprKind::ClassName(name), span: Span::new(l, r),
-    },
-    // Parameterized qualified type: Qual::Type::<Args>
-    <l:@L> <chain:QualChain> "::<" <_args:CommaPlus<ModuleArgInner>> ">" <r:@R> => {
         let (qual, name) = chain;
         TypeExpr {
             kind: TypeExprKind::ModuleAccess(
@@ -1546,7 +1543,6 @@ extern {
         "." => Token::Dot,
         ".." => Token::DotDot,
         "::" => Token::ColonColon,
-        "::<" => Token::ColonColonLt,
         "|" => Token::Pipe,
         "_" => Token::Underscore,
         "=" => Token::Eq,

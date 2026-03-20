@@ -15,15 +15,23 @@ use ocql_ql_ast::expr::Expr;
 /// Error type for parsing.
 pub type ParseError = lalrpop_util::ParseError<usize, Token, LexicalError>;
 
+/// Preprocess input: convert turbofish `::<` to `<` so the parser
+/// handles it with the existing `<` type-arg rules.
+fn preprocess(input: &str) -> String {
+    input.replace("::<", "<")
+}
+
 /// Parse a QL source file (query module or library module).
 pub fn parse_source_file(input: &str) -> Result<SourceFile, ParseError> {
-    let lexer = Lexer::new(input);
+    let processed = preprocess(input);
+    let lexer = Lexer::new(&processed);
     ql::SourceFileParser::new().parse(lexer)
 }
 
 /// Parse a single QL expression (for testing).
 pub fn parse_expr(input: &str) -> Result<Expr, ParseError> {
-    let lexer = Lexer::new(input);
+    let processed = preprocess(input);
+    let lexer = Lexer::new(&processed);
     ql::ExprRuleParser::new().parse(lexer)
 }
 
@@ -398,6 +406,38 @@ mod tests {
         // Closure call in expression context: result = pred+(x)
         let input = r#"
             int test(int x) { result = getNext+(x) }
+        "#;
+        let result = parse_source_file(input);
+        assert!(result.is_ok(), "Parse error: {:?}", result.err());
+    }
+
+    #[test]
+    fn test_parse_turbofish_module_alias() {
+        // Turbofish syntax: module Foo = Bar::<Config>;
+        let input = r#"
+            module Foo = Bar::<Config>;
+        "#;
+        let result = parse_source_file(input);
+        assert!(result.is_ok(), "Parse error: {:?}", result.err());
+    }
+
+    #[test]
+    fn test_parse_turbofish_qualified() {
+        // Turbofish in qualified context: Module::<T>::pred(x)
+        let input = r#"
+            predicate test(int x) { Module::<Config>::pred(x) }
+        "#;
+        let result = parse_source_file(input);
+        assert!(result.is_ok(), "Parse error: {:?}", result.err());
+    }
+
+    #[test]
+    fn test_parse_turbofish_implements() {
+        // Turbofish in implements clause
+        let input = r#"
+            module Impl implements Iface::<Config> {
+                predicate test() { 1 = 1 }
+            }
         "#;
         let result = parse_source_file(input);
         assert!(result.is_ok(), "Parse error: {:?}", result.err());
