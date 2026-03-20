@@ -6,6 +6,7 @@ members = [
     "crates/ocql-ql-parser",
     "crates/ocql-eval",
     "crates/ocql-schema",
+    "crates/ocql-database",
 ]
 
 [workspace.package]

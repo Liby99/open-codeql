@@ -1,0 +1,10 @@
+[package]
+name = "ocql-database"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+ocql-schema = { path = "../ocql-schema" }
+ordered-float = "4"
+smallvec = "1"
