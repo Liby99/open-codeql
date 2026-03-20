@@ -1,0 +1,48 @@
+// Points-to analysis — track which variables may point to which targets.
+//
+// Usage:
+//   cargo run --bin ocql --features cli -- examples/pointers.c -q examples/pointsto.dl
+
+// Base: int *p = &x  (address-of in initializer)
+// The init expr (child 0 of the decl) is an address-of (kind 31),
+// whose child 0 is a varaccess (kind 84) naming the target.
+base_points_to(ptr_name, target_name) :-
+    localvariables(decl_id, ptr_name, _kind),
+    exprparents(init_id, 0, decl_id),
+    exprs(init_id, 2, _loc1),
+    exprparents(target, 0, init_id),
+    exprs(target, 84, _loc2),
+    valuetext(target, target_name).
+
+// Base: p = &x  (address-of in assignment)
+base_points_to(ptr_name, target_name) :-
+    exprs(assign_id, 52, _loc1),
+    exprparents(lhs, 0, assign_id),
+    exprs(lhs, 84, _loc2),
+    valuetext(lhs, ptr_name),
+    exprparents(rhs, 1, assign_id),
+    exprs(rhs, 2, _loc3),
+    exprparents(target, 0, rhs),
+    exprs(target, 84, _loc4),
+    valuetext(target, target_name).
+
+// Copy: q = p  (pointer copy in initializer)
+var_copy(from_name, to_name) :-
+    localvariables(decl_id, to_name, _kind),
+    exprparents(init_id, 0, decl_id),
+    exprs(init_id, 84, _loc),
+    valuetext(init_id, from_name).
+
+// Copy: q = p  (pointer copy in assignment)
+var_copy(from_name, to_name) :-
+    exprs(assign_id, 52, _loc1),
+    exprparents(lhs, 0, assign_id),
+    exprs(lhs, 84, _loc2),
+    valuetext(lhs, to_name),
+    exprparents(rhs, 1, assign_id),
+    exprs(rhs, 84, _loc3),
+    valuetext(rhs, from_name).
+
+// Full points-to: base + copy propagation (transitive)
+points_to(ptr, target) :- base_points_to(ptr, target).
+points_to(ptr, target) :- var_copy(from, ptr), points_to(from, target).

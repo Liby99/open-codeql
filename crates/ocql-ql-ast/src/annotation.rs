@@ -58,6 +58,7 @@ pub enum OverlayKind {
     Local,
     Global,
     DiscardEntity,
+    Caller,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]

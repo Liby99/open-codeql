@@ -1,0 +1,24 @@
+// Call graph resolution — find all direct and transitive function calls.
+//
+// Usage:
+//   cargo run --bin ocql --features cli -- examples/hello.c -q examples/callgraph.dl
+
+// Direct call: caller_name calls callee_name
+direct_call(caller_name, callee_name) :-
+    exprs(call_id, 74, _loc1),                   // call expression (kind 74)
+    exprparents(callee_var, 0, call_id),          // child 0 = function ref
+    exprs(callee_var, 84, _loc2),                 // varaccess (kind 84)
+    valuetext(callee_var, callee_name),           // callee name
+    enclosingfunction(call_id, caller_func),      // enclosing function
+    functions(caller_func, caller_name, _kind).   // caller name
+
+// Transitive call reachability
+transitive_call(a, b) :- direct_call(a, b).
+transitive_call(a, b) :- transitive_call(a, c), direct_call(c, b).
+
+// Leaf functions — called but don't call anything themselves
+func_name(name) :- functions(_, name, _).
+leaf_func(name) :- func_name(name), not direct_call(name, _).
+
+// Root functions — call others but are never called
+root_func(name) :- func_name(name), direct_call(name, _), not direct_call(_, name).

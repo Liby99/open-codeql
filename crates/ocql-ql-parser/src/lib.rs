@@ -55,23 +55,17 @@ fn strip_block_comments(input: &str) -> String {
                 i += 1;
             }
         }
-        // Strip block comments
+        // Strip block comments (non-nested: QL block comments don't nest)
         else if i + 1 < bytes.len() && bytes[i] == b'/' && bytes[i + 1] == b'*' {
-            let mut depth = 1;
             result.push(b' ');
             result.push(b' ');
             i += 2;
-            while i < bytes.len() && depth > 0 {
-                if i + 1 < bytes.len() && bytes[i] == b'/' && bytes[i + 1] == b'*' {
-                    depth += 1;
+            while i < bytes.len() {
+                if i + 1 < bytes.len() && bytes[i] == b'*' && bytes[i + 1] == b'/' {
                     result.push(b' ');
                     result.push(b' ');
                     i += 2;
-                } else if i + 1 < bytes.len() && bytes[i] == b'*' && bytes[i + 1] == b'/' {
-                    depth -= 1;
-                    result.push(b' ');
-                    result.push(b' ');
-                    i += 2;
+                    break;
                 } else {
                     if bytes[i] == b'\n' {
                         result.push(b'\n');
@@ -510,5 +504,60 @@ mod tests {
         "#;
         let result = parse_source_file(input);
         assert!(result.is_ok(), "Parse error: {:?}", result.err());
+    }
+
+    #[test]
+    fn test_parse_coloncolon_import() {
+        let input = "private import internal.IRImports as Imports";
+        let result = parse_source_file(input);
+        assert!(result.is_ok(), "Parse error: {:?}", result.err());
+        let file = result.unwrap();
+        if let ocql_ql_ast::module::ModuleMember::Import(imp) = &file.members[0] {
+            assert_eq!(imp.path.parts, vec!["internal", "IRImports"]);
+            assert_eq!(imp.alias.as_ref().unwrap().name, "Imports");
+        }
+
+        let input2 = "import Imports::EdgeKind";
+        let result2 = parse_source_file(input2);
+        assert!(result2.is_ok(), "Parse error: {:?}", result2.err());
+        let file2 = result2.unwrap();
+        if let ocql_ql_ast::module::ModuleMember::Import(imp) = &file2.members[0] {
+            assert_eq!(imp.path.parts, vec!["Imports", "EdgeKind"]);
+        }
+    }
+
+    #[test]
+    fn test_parse_irguards_file() {
+        let path = "../../vendor/codeql/cpp/ql/lib/semmle/code/cpp/controlflow/IRGuards.qll";
+        let content = match std::fs::read_to_string(path) {
+            Ok(c) => c,
+            Err(_) => return, // Skip if vendor not available
+        };
+        let result = parse_source_file(&content);
+        if let Err(e) = &result {
+            match e {
+                lalrpop_util::ParseError::User { error } => {
+                    eprintln!("Lex error: {error}");
+                }
+                lalrpop_util::ParseError::InvalidToken { location } => {
+                    let before = &content[..*location];
+                    let line = before.chars().filter(|c| *c == '\n').count() + 1;
+                    let col = location - before.rfind('\n').unwrap_or(0);
+                    eprintln!("Invalid token at line {line}, col {col}");
+                    let start = location.saturating_sub(80);
+                    let end = (*location + 80).min(content.len());
+                    eprintln!("Context: {:?}", &content[start..end]);
+                }
+                lalrpop_util::ParseError::UnrecognizedToken { token, expected } => {
+                    let (loc, tok, _) = token;
+                    let before = &content[..*loc];
+                    let line = before.chars().filter(|c| *c == '\n').count() + 1;
+                    eprintln!("Unrecognized token {:?} at line {line}", tok);
+                    eprintln!("Expected: {:?}", &expected[..expected.len().min(10)]);
+                }
+                other => eprintln!("Other error: {other:?}"),
+            }
+            panic!("Parse failed for IRGuards.qll");
+        }
     }
 }

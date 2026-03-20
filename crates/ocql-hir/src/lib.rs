@@ -19,12 +19,11 @@ pub use types::Type;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
-use class_hierarchy::{ClassHierarchy, ClassInfo};
 use collect::DeclarationCollector;
 use module_graph::{ImportEdge, ModuleGraph, UnresolvedImport};
 use namespace::PredicateInfo;
 use ocql_common::Span;
-use ocql_ql_ast::module::{ClassMember, SourceFile};
+use ocql_ql_ast::module::SourceFile;
 use project::ProjectIndex;
 use source::SourceManager;
 
@@ -465,10 +464,26 @@ pub fn analyze_project(workspace_root: &Path) -> HirDatabase {
 
             // Phase 4b: Resolve module-member imports (e.g., `import Imports::EdgeKind`)
             // For each AST import that wasn't resolved as a file import, check if it's
-            // a module-member access pattern.
+            // a module-member access pattern or a re-exported module import.
             for member in &ast.members {
                 if let ocql_ql_ast::module::ModuleMember::Import(import) = member {
                     let parts = &import.path.parts;
+                    // Single-segment import of a re-exported module (e.g., `import InputIR`
+                    // where InputIR is a module alias re-exported from another import)
+                    if parts.len() == 1 {
+                        let name = &parts[0];
+                        // Check if it's already resolved as a file import
+                        let is_file_import = module_graph.file_imports(file_id).iter().any(|e| {
+                            e.import_path.len() == 1 && e.import_path[0] == *name
+                        });
+                        if !is_file_import {
+                            if let Some(&mod_def) = imported.modules.get(name.as_str()) {
+                                if let Some(mod_exp) = exported_ns.get(&mod_def.file) {
+                                    imported.merge_from(mod_exp);
+                                }
+                            }
+                        }
+                    }
                     if parts.len() >= 2 {
                         let first = &parts[0];
                         // Check if first segment is a known module alias

@@ -17,6 +17,10 @@ pub struct ModuleNamespaces {
 
     /// Module namespace: module name → DefId (Milestone 3).
     pub modules: HashMap<String, DefId>,
+
+    /// Type aliases: alias DefId → target type.
+    /// Used to resolve `class X = int;` for arithmetic type checking.
+    pub type_aliases: HashMap<DefId, Type>,
 }
 
 impl ModuleNamespaces {
@@ -36,6 +40,9 @@ impl ModuleNamespaces {
         }
         for (k, v) in &other.modules {
             self.modules.entry(k.clone()).or_insert(*v);
+        }
+        for (k, v) in &other.type_aliases {
+            self.type_aliases.entry(*k).or_insert_with(|| v.clone());
         }
     }
 }

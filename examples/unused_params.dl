@@ -1,0 +1,23 @@
+// Find potentially unused parameters — parameters whose names never appear
+// as a varaccess inside the function body.
+//
+// Usage:
+//   cargo run --bin ocql --features cli -- examples/hello.c -q examples/unused_params.dl
+
+// All parameters with their enclosing function
+// params(func_id, index, name, type)
+param_info(func_name, param_name) :-
+    params(func_id, _idx, param_name, _type),
+    functions(func_id, func_name, _kind).
+
+// Variables referenced inside a function
+used_var(func_name, var_name) :-
+    exprs(expr_id, 84, _loc),
+    valuetext(expr_id, var_name),
+    enclosingfunction(expr_id, func_id),
+    functions(func_id, func_name, _kind).
+
+// Unused parameters: declared but never referenced
+unused_param(func_name, param_name) :-
+    param_info(func_name, param_name),
+    not used_var(func_name, param_name).

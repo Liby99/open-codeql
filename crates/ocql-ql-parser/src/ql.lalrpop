@@ -610,6 +610,7 @@ Annotation: Annotation = {
             "local" => OverlayKind::Local,
             "global" => OverlayKind::Global,
             "discard_entity" => OverlayKind::DiscardEntity,
+            "caller" => OverlayKind::Caller,
             _ => return Err(lalrpop_util::ParseError::User { error: LexicalError { message: format!("unknown overlay kind: {}", s) } }),
         };
         Ok(Annotation {
@@ -622,6 +623,7 @@ Annotation: Annotation = {
             "local" => OverlayKind::Local,
             "global" => OverlayKind::Global,
             "discard_entity" => OverlayKind::DiscardEntity,
+            "caller" => OverlayKind::Caller,
             _ => return Err(lalrpop_util::ParseError::User { error: LexicalError { message: format!("unknown overlay kind: {}", s) } }),
         };
         Ok(Annotation {

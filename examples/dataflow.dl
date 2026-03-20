@@ -1,0 +1,42 @@
+// Local data flow analysis — track how values flow between variables.
+//
+// Usage:
+//   cargo run --bin ocql --features cli -- examples/hello.c -q examples/dataflow.dl
+
+// Source 1: Direct declaration init — int x = y;
+// The init expression (child 0 of the variable declaration) is a varaccess (kind 84).
+var_flow(func, var_name, init_name) :-
+    localvariables(var_id, var_name, _type),
+    exprparents(init_expr, 0, var_id),
+    exprs(init_expr, 84, _loc),
+    valuetext(init_expr, init_name),
+    enclosingfunction(var_id, fid),
+    functions(fid, func, _k).
+
+// Source 2: Assignment — y = x;
+// Assignment expression (kind 52), child 0 = lhs, child 1 = rhs (varaccess).
+var_flow(func, lhs, rhs_name) :-
+    exprs(assign_id, 52, _loc1),
+    exprparents(lv, 0, assign_id),
+    exprs(lv, 84, _loc2),
+    valuetext(lv, lhs),
+    exprparents(rv, 1, assign_id),
+    exprs(rv, 84, _loc3),
+    valuetext(rv, rhs_name),
+    enclosingfunction(assign_id, fid),
+    functions(fid, func, _k).
+
+// Source 3: Declaration init with compound RHS — int c = b + 1
+// Walk one level into the init expression to find varaccess operands.
+var_flow(func, var_name, operand_name) :-
+    localvariables(var_id, var_name, _type),
+    exprparents(init_expr, 0, var_id),
+    exprparents(operand, _idx, init_expr),
+    exprs(operand, 84, _loc),
+    valuetext(operand, operand_name),
+    enclosingfunction(var_id, fid),
+    functions(fid, func, _k).
+
+// Transitive flow: src flows to dst through intermediaries
+flow(func, src, dst) :- var_flow(func, dst, src).
+flow(func, src, dst) :- flow(func, src, mid), var_flow(func, dst, mid).

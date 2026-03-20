@@ -24,6 +24,9 @@ pub struct Atom {
 pub enum Term {
     Var(String),
     Const(Value),
+    /// A string literal from parsed text. Must be resolved against a
+    /// database's StringInterner before evaluation via `Program::resolve_strings()`.
+    StrLit(String),
 }
 
 /// An element of a rule body.
@@ -136,6 +139,47 @@ impl Program {
         let mut result: Vec<String> = body_preds.into_iter().collect();
         result.sort();
         result
+    }
+
+    /// Resolve all `Term::StrLit` values in the program by interning them
+    /// through the database's string interner. Must be called before evaluation
+    /// if the program was parsed from text containing string literals.
+    pub fn resolve_strings(&mut self, db: &mut ocql_database::Database) {
+        for rule in &mut self.rules {
+            resolve_terms_in_atom(&mut rule.head, db);
+            for elem in &mut rule.body {
+                match elem {
+                    BodyElement::Positive(atom) | BodyElement::Negated(atom) => {
+                        resolve_terms_in_atom(atom, db);
+                    }
+                    BodyElement::Guard(guard) => {
+                        resolve_term(&mut guard.left, db);
+                        resolve_term(&mut guard.right, db);
+                    }
+                    BodyElement::Aggregate { sub_rule, .. } => {
+                        resolve_terms_in_atom(&mut sub_rule.head, db);
+                        for sub_elem in &mut sub_rule.body {
+                            if let BodyElement::Positive(a) | BodyElement::Negated(a) = sub_elem {
+                                resolve_terms_in_atom(a, db);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+fn resolve_terms_in_atom(atom: &mut Atom, db: &mut ocql_database::Database) {
+    for term in &mut atom.terms {
+        resolve_term(term, db);
+    }
+}
+
+fn resolve_term(term: &mut Term, db: &mut ocql_database::Database) {
+    if let Term::StrLit(s) = term {
+        let interned = db.strings.intern(s);
+        *term = Term::Const(Value::String(interned));
     }
 }
 

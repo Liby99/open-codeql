@@ -72,7 +72,7 @@ fn ensure_relation_for_head(db: &mut Database, rule: &Rule) {
         .map(|(i, term)| {
             let col_name = match term {
                 Term::Var(v) => v.clone(),
-                Term::Const(_) => format!("c{}", i),
+                Term::Const(_) | Term::StrLit(_) => format!("c{}", i),
             };
             ColumnDef {
                 name: col_name,
@@ -311,6 +311,9 @@ fn match_atom(
                     bound_vals.push(val.clone());
                 }
             }
+            Term::StrLit(_) => {
+                panic!("unresolved string literal; call program.resolve_strings() first")
+            }
         }
     }
 
@@ -359,6 +362,9 @@ fn match_atom_tuple(atom: &Atom, tuple: &Tuple, bindings: &Bindings) -> Option<B
                     return None; // Constant doesn't match
                 }
             }
+            Term::StrLit(_) => {
+                panic!("unresolved string literal; call program.resolve_strings() first")
+            }
         }
     }
     Some(new_bindings)
@@ -390,6 +396,9 @@ fn has_any_match(atom: &Atom, db: &Database, bindings: &Bindings) -> Result<bool
                 } else {
                     all_bound = false;
                 }
+            }
+            Term::StrLit(_) => {
+                panic!("unresolved string literal; call program.resolve_strings() first")
             }
         }
     }
@@ -441,6 +450,9 @@ fn resolve_term(term: &Term, bindings: &Bindings) -> Option<Value> {
     match term {
         Term::Var(name) => bindings.get(name).cloned(),
         Term::Const(v) => Some(v.clone()),
+        Term::StrLit(_) => {
+            panic!("unresolved string literal in evaluation; call program.resolve_strings() first")
+        }
     }
 }
 

@@ -13,3 +13,23 @@ smallvec = "1"
 ocql-extractor-common = { path = "../ocql-extractor-common" }
 ocql-extractor-cpp = { path = "../ocql-extractor-cpp" }
 ocql-extractor-java = { path = "../ocql-extractor-java" }
+
+[[bin]]
+name = "ocql"
+path = "src/bin/ocql.rs"
+required-features = ["cli"]
+
+[features]
+cli = ["dep:ocql-extractor-common", "dep:ocql-extractor-cpp", "dep:ocql-extractor-java"]
+
+[dependencies.ocql-extractor-common]
+path = "../ocql-extractor-common"
+optional = true
+
+[dependencies.ocql-extractor-cpp]
+path = "../ocql-extractor-cpp"
+optional = true
+
+[dependencies.ocql-extractor-java]
+path = "../ocql-extractor-java"
+optional = true

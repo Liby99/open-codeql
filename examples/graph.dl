@@ -1,0 +1,33 @@
+// Pure Datalog example — graph reachability with no source extraction.
+// Demonstrates facts (rules with no body) and recursive rules.
+//
+// Usage (needs a dummy source file since the CLI requires one):
+//   cargo run --bin ocql --features cli -- examples/hello.c -q examples/graph.dl --show path,cycle_node,unreachable
+
+// Fact declarations: a directed graph
+//
+//   1 → 2 → 3 → 4
+//   ↓       ↑
+//   5 → 6 → 7
+//       ↓
+//       8
+//
+edge(1, 2).
+edge(2, 3).
+edge(3, 4).
+edge(1, 5).
+edge(5, 6).
+edge(6, 7).
+edge(7, 3).
+edge(6, 8).
+
+// Transitive reachability
+path(x, y) :- edge(x, y).
+path(x, y) :- path(x, z), edge(z, y).
+
+// Nodes in the graph
+node(x) :- edge(x, _).
+node(y) :- edge(_, y).
+
+// Unreachable from node 1
+unreachable(x) :- node(x), not path(1, x).

@@ -77,6 +77,13 @@ pub struct NameResolver<'a> {
     /// Whether we're currently inside a class member predicate or characteristic predicate.
     /// Used to suppress "undefined variable" errors for potential inherited fields.
     in_class_context: bool,
+    /// Module type parameters currently in scope (from parameterized modules).
+    /// Maps type parameter name → synthetic DefId.
+    module_type_params: HashMap<String, DefId>,
+    /// Nesting depth of parameterized modules (> 0 means inside one).
+    /// Used to suppress errors for unresolved predicates/types that may
+    /// come from module signature parameters.
+    in_parameterized_module: u32,
     pub name_resolutions: Vec<(Span, ResolvedRef)>,
     pub expr_types: Vec<(Span, Type)>,
     pub diagnostics: Vec<Diagnostic>,
@@ -102,6 +109,8 @@ impl<'a> NameResolver<'a> {
             scopes: Vec::new(),
             next_local: next_local_id,
             in_class_context: false,
+            module_type_params: HashMap::new(),
+            in_parameterized_module: 0,
             name_resolutions: Vec::new(),
             expr_types: Vec::new(),
             diagnostics: Vec::new(),
@@ -138,6 +147,15 @@ impl<'a> NameResolver<'a> {
         self.scopes.pop();
     }
 
+    fn fresh_def(&mut self) -> DefId {
+        let id = DefId {
+            file: self.file_id,
+            local: LocalDefId(self.next_local),
+        };
+        self.next_local += 1;
+        id
+    }
+
     fn define_var(&mut self, name: &str, ty: Type, _span: Span) -> DefId {
         let id = DefId {
             file: self.file_id,
@@ -165,13 +183,27 @@ impl<'a> NameResolver<'a> {
 
     /// Look up a type by name: local → imported → builtin → project
     fn lookup_type(&self, name: &str) -> Option<DefId> {
-        self.local_ns
-            .types
+        self.module_type_params
             .get(name)
+            .or_else(|| self.local_ns.types.get(name))
             .or_else(|| self.imported_ns.types.get(name))
             .or_else(|| self.builtin_ns.types.get(name))
             .or_else(|| self.project_ns.types.get(name))
             .copied()
+    }
+
+    /// If the given type is a Class that's actually a type alias for a primitive,
+    /// return the underlying primitive type. Otherwise return the type unchanged.
+    fn resolve_type_alias(&self, ty: &Type) -> Type {
+        if let Type::Class(def_id) = ty {
+            if let Some(target) = self.local_ns.type_aliases.get(def_id)
+                .or_else(|| self.imported_ns.type_aliases.get(def_id))
+                .or_else(|| self.project_ns.type_aliases.get(def_id))
+            {
+                return target.clone();
+            }
+        }
+        ty.clone()
     }
 
     /// Look up a predicate by (name, arity): local → imported → builtin → project
@@ -231,8 +263,24 @@ impl<'a> NameResolver<'a> {
             ModuleMember::Class(class) => self.resolve_class(class),
             ModuleMember::Select(select) => self.resolve_select(select),
             ModuleMember::Module(m) => {
+                // Register module type parameters in scope
+                let saved_type_params = if !m.type_params.is_empty() {
+                    let saved = self.module_type_params.clone();
+                    for param in &m.type_params {
+                        let param_def = self.fresh_def();
+                        self.module_type_params.insert(param.name.name.clone(), param_def);
+                    }
+                    self.in_parameterized_module += 1;
+                    Some(saved)
+                } else {
+                    None
+                };
                 for member in &m.members {
                     self.resolve_member(member);
+                }
+                if let Some(saved) = saved_type_params {
+                    self.module_type_params = saved;
+                    self.in_parameterized_module -= 1;
                 }
             }
             ModuleMember::Newtype(nt) => {
@@ -374,7 +422,9 @@ impl<'a> NameResolver<'a> {
                         .push((upper.span, ResolvedRef::Def(def_id)));
                     Type::Class(def_id)
                 } else {
-                    self.error(upper.span, format!("undefined type `{}`", upper.name));
+                    if self.in_parameterized_module == 0 {
+                        self.error(upper.span, format!("undefined type `{}`", upper.name));
+                    }
                     Type::Error
                 }
             }
@@ -536,7 +586,7 @@ impl<'a> NameResolver<'a> {
         if let Some(info) = self.lookup_predicate(name, arity) {
             self.name_resolutions
                 .push((span, ResolvedRef::Def(info.def_id)));
-        } else {
+        } else if self.in_parameterized_module == 0 {
             self.error(
                 span,
                 format!("undefined predicate `{name}` with arity {arity}"),
@@ -620,7 +670,8 @@ impl<'a> NameResolver<'a> {
 
             ExprKind::UnaryOp { op: _, operand } => {
                 let t = self.resolve_expr(operand);
-                if !t.is_numeric() && t != Type::Error {
+                let resolved_t = self.resolve_type_alias(&t);
+                if !resolved_t.is_numeric() && resolved_t != Type::Error {
                     self.error(
                         expr.span,
                         format!("unary operator requires numeric type, got `{t}`"),
@@ -649,10 +700,12 @@ impl<'a> NameResolver<'a> {
                         Type::Error
                     })
                 } else {
-                    self.error(
-                        name.span,
-                        format!("undefined predicate `{}` with arity {arity}", name.name),
-                    );
+                    if self.in_parameterized_module == 0 {
+                        self.error(
+                            name.span,
+                            format!("undefined predicate `{}` with arity {arity}", name.name),
+                        );
+                    }
                     Type::Error
                 }
             }
@@ -812,6 +865,9 @@ impl<'a> NameResolver<'a> {
     // -- type checking helpers --
 
     fn check_binary_op(&mut self, lt: &Type, rt: &Type, op: BinOp, span: Span) -> Type {
+        // Resolve type aliases (e.g., `class IntValue = int` → int)
+        let lt = &self.resolve_type_alias(lt);
+        let rt = &self.resolve_type_alias(rt);
         match op {
             BinOp::Add => {
                 if lt == &Type::Primitive(PrimitiveType::String)

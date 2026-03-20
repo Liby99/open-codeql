@@ -78,6 +78,10 @@ impl DeclarationCollector {
             ModuleMember::TypeAlias(ta) => {
                 let id = self.alloc_def(DefKind::TypeAlias, &ta.name.name, ta.span);
                 self.namespaces.types.insert(ta.name.name.clone(), id);
+                // Track the alias target for type checking (e.g., `class X = int`)
+                if let Some(target_type) = Self::resolve_simple_type(&ta.target) {
+                    self.namespaces.type_aliases.insert(id, target_type);
+                }
             }
             ModuleMember::ModuleAlias(ma) => {
                 let id = self.alloc_def(DefKind::ModuleAlias, &ma.name.name, ma.span);
@@ -154,6 +158,14 @@ impl DeclarationCollector {
 
     pub fn into_defs(self) -> Vec<DefInfo> {
         self.defs
+    }
+
+    /// Resolve a simple type alias target (primitives only).
+    fn resolve_simple_type(te: &TypeExpr) -> Option<Type> {
+        match &te.kind {
+            TypeExprKind::Primitive(p) => Some(Type::Primitive(*p)),
+            _ => None,
+        }
     }
 }
 

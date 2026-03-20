@@ -1,0 +1,6 @@
+// Find all functions in the source code.
+//
+// Usage:
+//   cargo run --bin ocql --features cli -- examples/hello.c -q examples/find_functions.dl
+
+all_functions(name) :- functions(_, name, _).
