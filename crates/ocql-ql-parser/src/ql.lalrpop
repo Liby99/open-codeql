@@ -267,6 +267,17 @@ ClassDecl: ClassDecl = {
         members: vec![],
         span: Span::new(l, r),
     },
+    // Signature class with both extends and instanceof, no body:
+    // signature class Foo extends Bar instanceof Baz;
+    <l:@L> <anns:Annotation*> "class" <name:UpperNameRule> "extends" <supers:CommaPlus<TypeExprRule>> "instanceof" <inst:CommaPlus<TypeExprRule>> ";" <r:@R> =>
+    ClassDecl {
+        annotations: anns,
+        name,
+        supertypes: supers,
+        instanceof: inst,
+        members: vec![],
+        span: Span::new(l, r),
+    },
 };
 
 ClassMemberRule: ClassMember = {
@@ -1424,6 +1435,7 @@ LowerNameRule: LowerName = {
     <l:@L> "abstract" <r:@R> => LowerName { name: "abstract".to_string(), span: Span::new(l, r) },
     <l:@L> "transient" <r:@R> => LowerName { name: "transient".to_string(), span: Span::new(l, r) },
     <l:@L> "pragma" <r:@R> => LowerName { name: "pragma".to_string(), span: Span::new(l, r) },
+    <l:@L> "extensible" <r:@R> => LowerName { name: "extensible".to_string(), span: Span::new(l, r) },
 };
 
 BindingsetNameRule: LowerName = {

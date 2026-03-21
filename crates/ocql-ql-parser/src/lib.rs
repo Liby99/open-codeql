@@ -15,11 +15,14 @@ use ocql_ql_ast::expr::Expr;
 /// Error type for parsing.
 pub type ParseError = lalrpop_util::ParseError<usize, Token, LexicalError>;
 
-/// Preprocess input: strip block comments, turbofish, and parameterized qual-chain tails.
+/// Preprocess input: strip block comments, turbofish, parameterized tails, keywords-as-idents.
 fn preprocess(input: &str) -> String {
     let stripped = strip_block_comments(input);
     let no_turbofish = stripped.replace("::<", "<");
-    strip_qual_chain_type_args(&no_turbofish)
+    let no_qual_args = strip_qual_chain_type_args(&no_turbofish);
+    let no_nested = flatten_nested_type_args(&no_qual_args);
+    let no_module_decl = strip_file_module_decl(&no_nested);
+    capitalize_keywords_as_classnames(&no_module_decl)
 }
 
 /// Strip type arguments from qualified chain tails: `Foo<Args>::bar` → `Foo::bar`.
@@ -133,6 +136,226 @@ fn find_balanced_close(bytes: &[u8], start: usize) -> Option<usize> {
         i += 1;
     }
     None
+}
+
+/// Flatten nested angle-bracket type arguments: `Foo<Bar<Baz>>` → `Foo<Bar      >`.
+///
+/// The grammar handles single-level `<...>` in ModuleExpr and SignatureParam,
+/// but not nested `<>`. We replace inner nested `<...>` with spaces while keeping
+/// the outermost `<>` pair intact for the grammar to handle.
+fn flatten_nested_type_args(input: &str) -> String {
+    let bytes = input.as_bytes();
+    let mut result = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+
+    while i < bytes.len() {
+        // Skip string literals
+        if bytes[i] == b'"' {
+            result.push(bytes[i]);
+            i += 1;
+            while i < bytes.len() && bytes[i] != b'"' {
+                if bytes[i] == b'\\' && i + 1 < bytes.len() {
+                    result.push(bytes[i]);
+                    result.push(bytes[i + 1]);
+                    i += 2;
+                } else {
+                    result.push(bytes[i]);
+                    i += 1;
+                }
+            }
+            if i < bytes.len() {
+                result.push(bytes[i]);
+                i += 1;
+            }
+            continue;
+        }
+
+        // Skip line comments
+        if i + 1 < bytes.len() && bytes[i] == b'/' && bytes[i + 1] == b'/' {
+            while i < bytes.len() && bytes[i] != b'\n' {
+                result.push(bytes[i]);
+                i += 1;
+            }
+            continue;
+        }
+
+        // Look for `<` after an identifier that contains nested `<>`
+        if bytes[i] == b'<' && i > 0 {
+            let prev = bytes[i - 1];
+            if prev.is_ascii_alphanumeric() || prev == b'_' {
+                if let Some(close) = find_balanced_close(bytes, i) {
+                    let has_nested = bytes[i + 1..close].contains(&b'<');
+                    if has_nested {
+                        // Keep the outer < but flatten inner nested <...> to spaces
+                        result.push(b'<');
+                        i += 1;
+                        let mut depth = 1;
+                        while i < bytes.len() && i <= close {
+                            if bytes[i] == b'<' {
+                                depth += 1;
+                                // Replace inner < with space
+                                result.push(b' ');
+                            } else if bytes[i] == b'>' {
+                                depth -= 1;
+                                if depth == 0 {
+                                    // Keep the outer >
+                                    result.push(b'>');
+                                } else {
+                                    // Replace inner > with space
+                                    result.push(b' ');
+                                }
+                            } else if bytes[i] == b'\n' {
+                                result.push(b'\n');
+                            } else if depth > 1 {
+                                // Inside nested <>, replace content with spaces
+                                result.push(b' ');
+                            } else {
+                                result.push(bytes[i]);
+                            }
+                            i += 1;
+                        }
+                        continue;
+                    }
+                }
+            }
+        }
+
+        result.push(bytes[i]);
+        i += 1;
+    }
+
+    String::from_utf8(result).unwrap_or_else(|_| input.to_string())
+}
+
+/// Strip file-level `module;` declarations and preceding annotations.
+///
+/// In CodeQL, `.qll` files can start with `overlay[local?]\nmodule;` to declare
+/// they are library modules with overlay annotations. Our parser already treats
+/// every file as a module, so we strip `module;` and any `overlay[...]` on the
+/// preceding line.
+fn strip_file_module_decl(input: &str) -> String {
+    let lines: Vec<&str> = input.split('\n').collect();
+    let mut blank_lines: Vec<bool> = vec![false; lines.len()];
+
+    for (i, line) in lines.iter().enumerate() {
+        if line.trim() == "module;" {
+            blank_lines[i] = true;
+            // Also blank the preceding line if it's an overlay annotation
+            if i > 0 && lines[i - 1].trim().starts_with("overlay[") {
+                blank_lines[i - 1] = true;
+            }
+        }
+    }
+
+    let mut result = String::with_capacity(input.len());
+    for (i, line) in lines.iter().enumerate() {
+        if blank_lines[i] {
+            for ch in line.chars() {
+                result.push(if ch == '\n' { '\n' } else { ' ' });
+            }
+        } else {
+            result.push_str(line);
+        }
+        if i < lines.len() - 1 {
+            result.push('\n');
+        }
+    }
+    result
+}
+
+/// Capitalize keywords when used as class names or type references.
+///
+/// QL allows keywords like `import`, `module`, `select`, `this` as class/type names.
+/// We detect patterns like `class import`, `extends import`, `instanceof import`
+/// and capitalize them so the lexer sees an upper_ident.
+fn capitalize_keywords_as_classnames(input: &str) -> String {
+    let keywords_as_types: &[(&str, &str)] = &[
+        ("import", "Import"),
+        ("module", "Module"),
+        ("select", "Select"),
+        ("this",   "This"),
+    ];
+    // Context words after which a keyword could be a type name
+    let context_words: &[&str] = &["class", "extends", "instanceof"];
+
+    let bytes = input.as_bytes();
+    let mut result = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+
+    while i < bytes.len() {
+        // Skip string literals
+        if bytes[i] == b'"' {
+            result.push(bytes[i]);
+            i += 1;
+            while i < bytes.len() && bytes[i] != b'"' {
+                if bytes[i] == b'\\' && i + 1 < bytes.len() {
+                    result.push(bytes[i]);
+                    result.push(bytes[i + 1]);
+                    i += 2;
+                } else {
+                    result.push(bytes[i]);
+                    i += 1;
+                }
+            }
+            if i < bytes.len() {
+                result.push(bytes[i]);
+                i += 1;
+            }
+            continue;
+        }
+
+        // Skip line comments
+        if i + 1 < bytes.len() && bytes[i] == b'/' && bytes[i + 1] == b'/' {
+            while i < bytes.len() && bytes[i] != b'\n' {
+                result.push(bytes[i]);
+                i += 1;
+            }
+            continue;
+        }
+
+        // Check if we're at a keyword that could be a type name
+        let mut replaced = false;
+        for &(kw, cap) in keywords_as_types {
+            let kw_bytes = kw.as_bytes();
+            if i + kw_bytes.len() <= bytes.len()
+                && &bytes[i..i + kw_bytes.len()] == kw_bytes
+                // Not part of a larger identifier
+                && (i + kw_bytes.len() >= bytes.len()
+                    || !bytes[i + kw_bytes.len()].is_ascii_alphanumeric()
+                        && bytes[i + kw_bytes.len()] != b'_')
+            {
+                // Check preceding context: skip whitespace backwards, then check for context word or comma
+                let before = &result;
+                let trimmed_end = before.iter().rposition(|&b| b != b' ' && b != b'\t' && b != b'\n' && b != b'\r');
+                if let Some(end_pos) = trimmed_end {
+                    let preceding = &before[..=end_pos];
+                    let is_type_context = context_words.iter().any(|cw| {
+                        let cw_bytes = cw.as_bytes();
+                        preceding.len() >= cw_bytes.len()
+                            && &preceding[preceding.len() - cw_bytes.len()..] == cw_bytes
+                            // Ensure word boundary before context word
+                            && (preceding.len() == cw_bytes.len()
+                                || !preceding[preceding.len() - cw_bytes.len() - 1].is_ascii_alphanumeric()
+                                    && preceding[preceding.len() - cw_bytes.len() - 1] != b'_')
+                    });
+
+                    if is_type_context {
+                        result.extend_from_slice(cap.as_bytes());
+                        i += kw_bytes.len();
+                        replaced = true;
+                        break;
+                    }
+                }
+            }
+        }
+
+        if !replaced {
+            result.push(bytes[i]);
+            i += 1;
+        }
+    }
+
+    String::from_utf8(result).unwrap_or_else(|_| input.to_string())
 }
 
 /// Strip block comments from input, handling nesting.
@@ -649,5 +872,29 @@ mod tests {
         };
         let result = parse_source_file(&content);
         assert!(result.is_ok(), "Parse failed for IRGuards.qll: {:?}", result.err());
+    }
+
+    #[test]
+    fn test_parse_signature_module_with_body() {
+        let input = r#"
+            signature module InputSig<FileSig File, LocationSig Location> {
+                class FooBase;
+                predicate bar_(FooBase e, Location loc);
+                class BazBase instanceof FooBase;
+            }
+        "#;
+        let result = parse_source_file(input);
+        assert!(result.is_ok(), "Parse error: {:?}", result.err());
+    }
+
+    #[test]
+    fn test_parse_xml_file() {
+        let path = "../../vendor/codeql/shared/xml/codeql/xml/Xml.qll";
+        let content = match std::fs::read_to_string(path) {
+            Ok(c) => c,
+            Err(_) => return,
+        };
+        let result = parse_source_file(&content);
+        assert!(result.is_ok(), "Parse failed for Xml.qll: {:?}", result.err());
     }
 }
