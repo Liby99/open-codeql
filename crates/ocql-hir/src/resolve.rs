@@ -192,18 +192,24 @@ impl<'a> NameResolver<'a> {
             .copied()
     }
 
-    /// If the given type is a Class that's actually a type alias for a primitive,
-    /// return the underlying primitive type. Otherwise return the type unchanged.
+    /// If the given type is a Class that ultimately maps to a primitive
+    /// (via type aliases or extends-primitive), return the primitive.
+    /// Chases through alias chains (e.g., UnboundList → String → string).
     fn resolve_type_alias(&self, ty: &Type) -> Type {
-        if let Type::Class(def_id) = ty {
-            if let Some(target) = self.local_ns.type_aliases.get(def_id)
-                .or_else(|| self.imported_ns.type_aliases.get(def_id))
-                .or_else(|| self.project_ns.type_aliases.get(def_id))
-            {
-                return target.clone();
+        let mut current = ty.clone();
+        for _ in 0..10 {
+            if let Type::Class(def_id) = &current {
+                if let Some(target) = self.local_ns.type_aliases.get(def_id)
+                    .or_else(|| self.imported_ns.type_aliases.get(def_id))
+                    .or_else(|| self.project_ns.type_aliases.get(def_id))
+                {
+                    current = target.clone();
+                    continue;
+                }
             }
+            break;
         }
-        ty.clone()
+        current
     }
 
     /// Look up a predicate by (name, arity): local → imported → builtin → project
@@ -402,7 +408,11 @@ impl<'a> NameResolver<'a> {
             self.resolve_formula(where_clause);
         }
         for sel_expr in &select.select_exprs {
-            self.resolve_expr(&sel_expr.expr);
+            let ty = self.resolve_expr(&sel_expr.expr);
+            // `select expr as alias` defines the alias as a variable for ORDER BY
+            if let Some(label) = &sel_expr.label {
+                self.define_var(label, ty, sel_expr.span);
+            }
         }
         for order_item in &select.order_by {
             self.resolve_expr(&order_item.expr);

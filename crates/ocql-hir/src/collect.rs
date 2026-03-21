@@ -88,8 +88,30 @@ impl DeclarationCollector {
                 self.namespaces.modules.insert(ma.name.name.clone(), id);
             }
             ModuleMember::PredicateAlias(pa) => {
-                let _id = self.alloc_def(DefKind::PredicateAlias, &pa.name.name, pa.span);
-                // TODO: register with target arity once we resolve the target
+                let id = self.alloc_def(DefKind::PredicateAlias, &pa.name.name, pa.span);
+                let arity = pa.target_arity as usize;
+                // Try to find the target predicate to copy its result type
+                let target_name = pa.target_name.parts.last().unwrap_or(&pa.name.name).clone();
+                let result_type = self.namespaces.predicates
+                    .get(&(target_name, arity))
+                    .and_then(|info| info.result_type.clone())
+                    // If the target is qualified (not found locally), assume it may
+                    // have a result type to avoid false "no result type" errors.
+                    .or_else(|| {
+                        if pa.target_name.parts.len() > 1 {
+                            Some(Type::Error)
+                        } else {
+                            None
+                        }
+                    });
+                self.namespaces.predicates.insert(
+                    (pa.name.name.clone(), arity),
+                    PredicateInfo {
+                        def_id: id,
+                        result_type,
+                        arity,
+                    },
+                );
             }
             ModuleMember::Import(_) => {} // Handled by module graph
             ModuleMember::Signature(_) => {} // Milestone 6
@@ -122,6 +144,26 @@ impl DeclarationCollector {
         self.namespaces
             .types
             .insert(class.name.name.clone(), class_id);
+
+        // Record primitive supertype for operator resolution.
+        // In QL, `class Foo extends int { ... }` inherits int's operators.
+        // Also chase through class aliases (e.g., `class Foo extends MyString`
+        // where `class MyString = string`).
+        for sup in &class.supertypes {
+            if let Some(target) = Self::resolve_simple_type(sup) {
+                self.namespaces.type_aliases.insert(class_id, target);
+                break;
+            }
+            // If the supertype is a class name, check if it's already a known alias
+            if let TypeExprKind::ClassName(name) = &sup.kind {
+                if let Some(&sup_def) = self.namespaces.types.get(&name.name) {
+                    if let Some(target) = self.namespaces.type_aliases.get(&sup_def) {
+                        self.namespaces.type_aliases.insert(class_id, target.clone());
+                        break;
+                    }
+                }
+            }
+        }
 
         for member in &class.members {
             match member {

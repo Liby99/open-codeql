@@ -15,10 +15,124 @@ use ocql_ql_ast::expr::Expr;
 /// Error type for parsing.
 pub type ParseError = lalrpop_util::ParseError<usize, Token, LexicalError>;
 
-/// Preprocess input: strip nested block comments and convert turbofish syntax.
+/// Preprocess input: strip block comments, turbofish, and parameterized qual-chain tails.
 fn preprocess(input: &str) -> String {
     let stripped = strip_block_comments(input);
-    stripped.replace("::<", "<")
+    let no_turbofish = stripped.replace("::<", "<");
+    strip_qual_chain_type_args(&no_turbofish)
+}
+
+/// Strip type arguments from qualified chain tails: `Foo<Args>::bar` → `Foo::bar`.
+///
+/// In QL, parameterized module access like `Module<Config>::member()` uses angle
+/// brackets that create LALR(1) ambiguity with less-than. We strip these type args
+/// during preprocessing since the grammar's QualChain can only handle `<` on the
+/// first segment.
+///
+/// Only strips `<...>` that are:
+/// - Preceded by an uppercase identifier (module/type name)
+/// - Followed by `::` (qualified member access)
+/// - Contain balanced angle brackets
+fn strip_qual_chain_type_args(input: &str) -> String {
+    let bytes = input.as_bytes();
+    let mut result = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+
+    while i < bytes.len() {
+        // Skip string literals
+        if bytes[i] == b'"' {
+            result.push(bytes[i]);
+            i += 1;
+            while i < bytes.len() && bytes[i] != b'"' {
+                if bytes[i] == b'\\' && i + 1 < bytes.len() {
+                    result.push(bytes[i]);
+                    result.push(bytes[i + 1]);
+                    i += 2;
+                } else {
+                    result.push(bytes[i]);
+                    i += 1;
+                }
+            }
+            if i < bytes.len() {
+                result.push(bytes[i]);
+                i += 1;
+            }
+            continue;
+        }
+
+        // Skip line comments
+        if i + 1 < bytes.len() && bytes[i] == b'/' && bytes[i + 1] == b'/' {
+            while i < bytes.len() && bytes[i] != b'\n' {
+                result.push(bytes[i]);
+                i += 1;
+            }
+            continue;
+        }
+
+        // Check for UpperIdent < ... > :: pattern
+        if bytes[i] == b'<' && i > 0 {
+            // Check if preceded by an identifier character (letter/digit/_)
+            let prev = bytes[i - 1];
+            if prev.is_ascii_alphanumeric() || prev == b'_' {
+                // Scan for balanced > followed by ::
+                if let Some(close) = find_balanced_close(bytes, i) {
+                    // Check if > is followed by ::
+                    let after = close + 1;
+                    if after + 1 < bytes.len() && bytes[after] == b':' && bytes[after + 1] == b':' {
+                        // Replace < ... > with spaces (preserving newlines for span accuracy)
+                        for j in i..=close {
+                            if bytes[j] == b'\n' {
+                                result.push(b'\n');
+                            } else {
+                                result.push(b' ');
+                            }
+                        }
+                        i = close + 1;
+                        continue;
+                    }
+                }
+            }
+        }
+
+        result.push(bytes[i]);
+        i += 1;
+    }
+
+    String::from_utf8(result).unwrap_or_else(|_| input.to_string())
+}
+
+/// Find the matching `>` for a `<` at position `start`, handling nesting.
+/// Returns the index of the closing `>`, or None if unbalanced.
+fn find_balanced_close(bytes: &[u8], start: usize) -> Option<usize> {
+    let mut depth = 1;
+    let mut i = start + 1;
+    while i < bytes.len() && depth > 0 {
+        match bytes[i] {
+            b'<' => depth += 1,
+            b'>' => {
+                depth -= 1;
+                if depth == 0 {
+                    return Some(i);
+                }
+            }
+            b'"' => {
+                // Skip string literals inside type args
+                i += 1;
+                while i < bytes.len() && bytes[i] != b'"' {
+                    if bytes[i] == b'\\' && i + 1 < bytes.len() {
+                        i += 2;
+                    } else {
+                        i += 1;
+                    }
+                }
+            }
+            b'\n' => {} // allowed inside type args (multiline)
+            b';' | b'{' | b'}' => return None, // statement boundary — not a type arg
+            _ => {}
+        }
+        i += 1;
+    }
+    None
 }
 
 /// Strip block comments from input, handling nesting.
@@ -531,33 +645,9 @@ mod tests {
         let path = "../../vendor/codeql/cpp/ql/lib/semmle/code/cpp/controlflow/IRGuards.qll";
         let content = match std::fs::read_to_string(path) {
             Ok(c) => c,
-            Err(_) => return, // Skip if vendor not available
+            Err(_) => return,
         };
         let result = parse_source_file(&content);
-        if let Err(e) = &result {
-            match e {
-                lalrpop_util::ParseError::User { error } => {
-                    eprintln!("Lex error: {error}");
-                }
-                lalrpop_util::ParseError::InvalidToken { location } => {
-                    let before = &content[..*location];
-                    let line = before.chars().filter(|c| *c == '\n').count() + 1;
-                    let col = location - before.rfind('\n').unwrap_or(0);
-                    eprintln!("Invalid token at line {line}, col {col}");
-                    let start = location.saturating_sub(80);
-                    let end = (*location + 80).min(content.len());
-                    eprintln!("Context: {:?}", &content[start..end]);
-                }
-                lalrpop_util::ParseError::UnrecognizedToken { token, expected } => {
-                    let (loc, tok, _) = token;
-                    let before = &content[..*loc];
-                    let line = before.chars().filter(|c| *c == '\n').count() + 1;
-                    eprintln!("Unrecognized token {:?} at line {line}", tok);
-                    eprintln!("Expected: {:?}", &expected[..expected.len().min(10)]);
-                }
-                other => eprintln!("Other error: {other:?}"),
-            }
-            panic!("Parse failed for IRGuards.qll");
-        }
+        assert!(result.is_ok(), "Parse failed for IRGuards.qll: {:?}", result.err());
     }
 }

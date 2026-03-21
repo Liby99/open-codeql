@@ -112,6 +112,10 @@ impl Builtins {
         register_global_pred(&mut alloc, &mut ns, "unreachable", 0, None);
         register_global_pred(&mut alloc, &mut ns, "none", 0, None);
         register_global_pred(&mut alloc, &mut ns, "any", 0, None);
+        // toUrl: built-in URL construction predicate
+        register_global_pred(&mut alloc, &mut ns, "toUrl", 5, Some(Type::Primitive(PrimitiveType::String)));
+        register_global_pred(&mut alloc, &mut ns, "toUrl", 6, Some(Type::Primitive(PrimitiveType::String)));
+        register_global_pred(&mut alloc, &mut ns, "unresolveElement", 1, Some(Type::Error));
 
         Self {
             namespaces: ns,
