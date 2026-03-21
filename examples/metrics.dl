@@ -1,0 +1,36 @@
+// Code metrics — compute simple function-level metrics.
+//
+// Usage:
+//   cargo run --bin ocql --features cli -- examples/hello.c -q examples/metrics.dl
+
+// Count parameters per function
+// params(func_id, index, name, type)
+param_count_helper(func_id, func_name, idx) :-
+    params(func_id, idx, _name, _type),
+    functions(func_id, func_name, _kind).
+
+// Max param index + 1 = param count (since indices are 0-based)
+param_with_next(func_name, next_idx) :-
+    param_count_helper(_fid, func_name, idx),
+    next_idx = idx + 1.
+
+// Count expressions per function
+expr_in_func(func_name, expr_id) :-
+    exprs(expr_id, _kind, _loc),
+    enclosingfunction(expr_id, func_id),
+    functions(func_id, func_name, _k).
+
+// Count statements per function
+stmt_in_func(func_name, stmt_id) :-
+    stmts(stmt_id, _kind, _loc),
+    enclosingfunction(stmt_id, func_id),
+    functions(func_id, func_name, _k).
+
+// Count calls made by each function
+calls_made(caller_name, callee_name) :-
+    exprs(call_id, 74, _loc1),
+    exprparents(callee_var, 0, call_id),
+    exprs(callee_var, 84, _loc2),
+    valuetext(callee_var, callee_name),
+    enclosingfunction(call_id, caller_func),
+    functions(caller_func, caller_name, _kind).

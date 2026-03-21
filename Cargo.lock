@@ -346,6 +346,7 @@ dependencies = [
  "ocql-extractor-cpp",
  "ocql-extractor-java",
  "ocql-schema",
+ "ordered-float",
  "smallvec",
 ]
 

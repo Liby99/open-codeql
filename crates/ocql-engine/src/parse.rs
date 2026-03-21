@@ -7,7 +7,6 @@
 //!
 //! ```text
 //! // Line comments
-//! % Also line comments (Prolog-style)
 //!
 //! // A rule with body:
 //! path(x, y) :- edge(x, y).
@@ -34,7 +33,7 @@
 //! ```
 
 use ocql_database::Value;
-use crate::rule::{Atom, BodyElement, CompOp, Guard, Program, Rule, Term};
+use crate::rule::{ArithExpr, ArithOp, Atom, BodyElement, CompOp, Guard, Program, Rule, Term};
 
 /// Parse error with position information.
 #[derive(Debug, Clone)]
@@ -79,6 +78,11 @@ enum Token {
     Le,               // <=
     Gt,               // >
     Ge,               // >=
+    Plus,             // +
+    Minus,            // - (when not part of negative int)
+    Star,             // *
+    Slash,            // /
+    Percent,          // %
     Underscore,       // bare _ (wildcard)
     Eof,
 }
@@ -142,13 +146,7 @@ impl<'a> Lexer<'a> {
                 }
                 continue;
             }
-            // Skip % comments (Prolog-style)
-            if self.pos < self.input.len() && self.input[self.pos] == b'%' {
-                while self.pos < self.input.len() && self.input[self.pos] != b'\n' {
-                    self.advance();
-                }
-                continue;
-            }
+            // Note: Prolog-style % comments removed — conflicts with % modulo operator
             // Skip /* ... */ block comments
             if self.pos + 1 < self.input.len()
                 && self.input[self.pos] == b'/'
@@ -184,6 +182,19 @@ impl<'a> Lexer<'a> {
             b',' => { self.advance(); Ok((Token::Comma, span)) }
             b'.' => { self.advance(); Ok((Token::Dot, span)) }
             b'=' => { self.advance(); Ok((Token::Eq, span)) }
+            b'+' => { self.advance(); Ok((Token::Plus, span)) }
+            b'*' => { self.advance(); Ok((Token::Star, span)) }
+            b'/' => {
+                // Check for comments first — handled in skip_whitespace_and_comments
+                // If we get here, it's a division operator
+                self.advance();
+                Ok((Token::Slash, span))
+            }
+            b'%' => {
+                // Check for comments first — handled in skip_whitespace_and_comments
+                self.advance();
+                Ok((Token::Percent, span))
+            }
             b'!' => {
                 self.advance();
                 if self.peek_byte() == Some(b'=') {
@@ -262,6 +273,10 @@ impl<'a> Lexer<'a> {
                     col: span.col,
                 })?;
                 Ok((Token::Int(-val), span))
+            }
+            b'-' => {
+                self.advance();
+                Ok((Token::Minus, span))
             }
             b'0'..=b'9' => {
                 let start = self.pos;
@@ -428,7 +443,47 @@ impl<'a> Parser<'a> {
                 return Ok(BodyElement::Positive(Atom::new(&name, terms)));
             }
 
-            // It's a guard: name op term
+            // It's a guard or assignment: name op ...
+            // For `=`, we need to disambiguate:
+            //   name = term arith_op term  →  Assign { result_var: name, expr: ... }
+            //   name = term                →  Guard { left: name, op: Eq, right: term }
+            //   name comp_op term          →  Guard { left: name, op, right: term }
+            if self.current == Token::Eq {
+                self.advance()?; // consume =
+                let first_term = self.parse_term()?;
+                // Check if followed by an arithmetic operator
+                if let Some(arith_op) = self.try_arith_op() {
+                    self.advance()?; // consume arith op
+                    let second_term = self.parse_term()?;
+                    return Ok(BodyElement::Assign {
+                        result_var: name,
+                        expr: ArithExpr { left: first_term, op: arith_op, right: second_term },
+                    });
+                }
+                // Handle `z = x - 1` where lexer parsed `-1` as Int(-1):
+                // If first_term is a variable and we see a negative integer,
+                // treat as subtraction.
+                if let Token::Int(neg) = &self.current {
+                    if *neg < 0 {
+                        if let Term::Var(_) = &first_term {
+                            let abs_val = neg.checked_neg().unwrap_or(0);
+                            let second_term = Term::Const(Value::Int(abs_val));
+                            self.advance()?;
+                            return Ok(BodyElement::Assign {
+                                result_var: name,
+                                expr: ArithExpr { left: first_term, op: ArithOp::Sub, right: second_term },
+                            });
+                        }
+                    }
+                }
+                // Just equality guard: name = term
+                return Ok(BodyElement::Guard(Guard {
+                    left: Term::Var(name),
+                    op: CompOp::Eq,
+                    right: first_term,
+                }));
+            }
+
             let left = Term::Var(name);
             let op = self.parse_comp_op()?;
             let right = self.parse_term()?;
@@ -513,6 +568,19 @@ impl<'a> Parser<'a> {
                 line: self.current_span.line,
                 col: self.current_span.col,
             }),
+        }
+    }
+
+    // ---- Arithmetic operator (lookahead) ----
+
+    fn try_arith_op(&self) -> Option<ArithOp> {
+        match &self.current {
+            Token::Plus => Some(ArithOp::Add),
+            Token::Minus => Some(ArithOp::Sub),
+            Token::Star => Some(ArithOp::Mul),
+            Token::Slash => Some(ArithOp::Div),
+            Token::Percent => Some(ArithOp::Mod),
+            _ => None,
         }
     }
 
@@ -615,7 +683,6 @@ mod tests {
         let input = r#"
             // This is a comment
             path(x, y) :- edge(x, y).  // inline comment
-            % Prolog-style comment
             /* block comment */
             path(x, y) :- path(x, z), edge(z, y).
         "#;
@@ -724,5 +791,82 @@ mod tests {
     fn test_parse_error_bad_token() {
         let err = parse_program("path(x, y) :- edge(x, y) @.").unwrap_err();
         assert!(err.message.contains("unexpected character"));
+    }
+
+    #[test]
+    fn test_parse_arithmetic_add() {
+        let input = "sum(x, z) :- vals(x, y), z = x + y.";
+        let program = parse_program(input).unwrap();
+        assert_eq!(program.rules[0].body.len(), 2);
+        match &program.rules[0].body[1] {
+            BodyElement::Assign { result_var, expr } => {
+                assert_eq!(result_var, "z");
+                assert_eq!(expr.op, ArithOp::Add);
+                assert!(matches!(&expr.left, Term::Var(n) if n == "x"));
+                assert!(matches!(&expr.right, Term::Var(n) if n == "y"));
+            }
+            other => panic!("expected Assign, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_parse_arithmetic_all_ops() {
+        let ops = vec![
+            ("z = x + y", ArithOp::Add),
+            ("z = x - y", ArithOp::Sub),
+            ("z = x * y", ArithOp::Mul),
+            ("z = x / y", ArithOp::Div),
+            ("z = x % y", ArithOp::Mod),
+        ];
+        for (assign_str, expected_op) in ops {
+            let input = format!("r(z) :- s(x, y), {}.", assign_str);
+            let program = parse_program(&input).unwrap();
+            match &program.rules[0].body[1] {
+                BodyElement::Assign { expr, .. } => {
+                    assert_eq!(expr.op, expected_op, "failed for: {}", assign_str);
+                }
+                other => panic!("expected Assign for: {}, got {:?}", assign_str, other),
+            }
+        }
+    }
+
+    #[test]
+    fn test_parse_arithmetic_with_constant() {
+        let input = "inc(x, z) :- vals(x), z = x + 1.";
+        let program = parse_program(input).unwrap();
+        match &program.rules[0].body[1] {
+            BodyElement::Assign { result_var, expr } => {
+                assert_eq!(result_var, "z");
+                assert!(matches!(&expr.right, Term::Const(Value::Int(1))));
+            }
+            other => panic!("expected Assign, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_parse_equality_vs_arithmetic() {
+        // x = y should be a Guard (equality), not an Assign
+        let input = "r(x) :- s(x, y), x = y.";
+        let program = parse_program(input).unwrap();
+        assert!(matches!(&program.rules[0].body[1], BodyElement::Guard(_)));
+
+        // z = x + 1 should be an Assign
+        let input2 = "r(z) :- s(x), z = x + 1.";
+        let program2 = parse_program(input2).unwrap();
+        assert!(matches!(&program2.rules[0].body[1], BodyElement::Assign { .. }));
+    }
+
+    #[test]
+    fn test_parse_subtraction_with_constant() {
+        // z = x - 1 should be Assign (subtraction), not z = x followed by -1
+        let input = "r(z) :- s(x), z = x - 1.";
+        let program = parse_program(input).unwrap();
+        match &program.rules[0].body[1] {
+            BodyElement::Assign { expr, .. } => {
+                assert_eq!(expr.op, ArithOp::Sub);
+                assert!(matches!(&expr.right, Term::Const(Value::Int(1))));
+            }
+            other => panic!("expected Assign with Sub, got {:?}", other),
+        }
     }
 }

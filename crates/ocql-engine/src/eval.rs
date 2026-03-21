@@ -210,6 +210,13 @@ fn evaluate_rule_with_delta(
                         next_bindings.push(bindings.clone());
                     }
                 }
+                BodyElement::Assign { result_var, expr } => {
+                    if let Some(val) = eval_arith(expr, bindings) {
+                        let mut new_bindings = bindings.clone();
+                        new_bindings.insert(result_var.clone(), val);
+                        next_bindings.push(new_bindings);
+                    }
+                }
                 BodyElement::Aggregate { result_var, function, sub_rule, group_by, agg_var } => {
                     let agg_result = eval_aggregate(
                         function, sub_rule, group_by, agg_var, db, bindings,
@@ -261,6 +268,13 @@ fn evaluate_body(
                 BodyElement::Guard(guard) => {
                     if eval_guard(guard, bindings) {
                         next.push(bindings.clone());
+                    }
+                }
+                BodyElement::Assign { result_var, expr } => {
+                    if let Some(val) = eval_arith(expr, bindings) {
+                        let mut new_bindings = bindings.clone();
+                        new_bindings.insert(result_var.clone(), val);
+                        next.push(new_bindings);
                     }
                 }
                 BodyElement::Aggregate { result_var, function, sub_rule, group_by, agg_var } => {
@@ -442,6 +456,81 @@ fn eval_guard(guard: &Guard, bindings: &Bindings) -> bool {
             }
         }
         _ => false, // Unbound variable in guard → fail
+    }
+}
+
+/// Evaluate an arithmetic expression, returning the computed value.
+/// Returns None if operands are unbound or types are incompatible.
+fn eval_arith(expr: &crate::rule::ArithExpr, bindings: &Bindings) -> Option<Value> {
+    use crate::rule::ArithOp;
+
+    let left = resolve_term(&expr.left, bindings)?;
+    let right = resolve_term(&expr.right, bindings)?;
+
+    match (&left, &right) {
+        (Value::Int(a), Value::Int(b)) => {
+            let result = match expr.op {
+                ArithOp::Add => a.checked_add(*b)?,
+                ArithOp::Sub => a.checked_sub(*b)?,
+                ArithOp::Mul => a.checked_mul(*b)?,
+                ArithOp::Div => {
+                    if *b == 0 { return None; }
+                    a.checked_div(*b)?
+                }
+                ArithOp::Mod => {
+                    if *b == 0 { return None; }
+                    a.checked_rem(*b)?
+                }
+            };
+            Some(Value::Int(result))
+        }
+        (Value::Float(a), Value::Float(b)) => {
+            let result = match expr.op {
+                ArithOp::Add => a.into_inner() + b.into_inner(),
+                ArithOp::Sub => a.into_inner() - b.into_inner(),
+                ArithOp::Mul => a.into_inner() * b.into_inner(),
+                ArithOp::Div => {
+                    if b.into_inner() == 0.0 { return None; }
+                    a.into_inner() / b.into_inner()
+                }
+                ArithOp::Mod => {
+                    if b.into_inner() == 0.0 { return None; }
+                    a.into_inner() % b.into_inner()
+                }
+            };
+            Some(Value::Float(ordered_float::OrderedFloat(result)))
+        }
+        // Mixed int/float: promote int to float
+        (Value::Int(a), Value::Float(b)) => {
+            let a = *a as f64;
+            let b = b.into_inner();
+            let result = match expr.op {
+                ArithOp::Add => a + b,
+                ArithOp::Sub => a - b,
+                ArithOp::Mul => a * b,
+                ArithOp::Div => { if b == 0.0 { return None; } a / b }
+                ArithOp::Mod => { if b == 0.0 { return None; } a % b }
+            };
+            Some(Value::Float(ordered_float::OrderedFloat(result)))
+        }
+        (Value::Float(a), Value::Int(b)) => {
+            let a = a.into_inner();
+            let b = *b as f64;
+            let result = match expr.op {
+                ArithOp::Add => a + b,
+                ArithOp::Sub => a - b,
+                ArithOp::Mul => a * b,
+                ArithOp::Div => { if b == 0.0 { return None; } a / b }
+                ArithOp::Mod => { if b == 0.0 { return None; } a % b }
+            };
+            Some(Value::Float(ordered_float::OrderedFloat(result)))
+        }
+        // String concatenation with Add
+        (Value::String(_), Value::String(_)) if expr.op == ArithOp::Add => {
+            // String concatenation not supported without StringInterner access
+            None
+        }
+        _ => None, // Type mismatch
     }
 }
 
@@ -897,5 +986,122 @@ mod tests {
         );
         assert_eq!(path_count, 499 * 500 / 2); // n*(n+1)/2 - n = n*(n-1)/2 ... actually 499*500/2 = 124,750
         assert!(elapsed.as_secs() < 30, "transitive closure took too long: {:?}", elapsed);
+    }
+
+    #[test]
+    fn test_arithmetic_add() {
+        let mut db = make_graph_db();
+        // sum(x, y, z) :- edge(x, y), z = x + y.
+        let program = Program::new(vec![
+            Rule::new(
+                Atom::new("sum", vec![var("x"), var("y"), var("z")]),
+                vec![
+                    BodyElement::Positive(Atom::new("edge", vec![var("x"), var("y")])),
+                    BodyElement::Assign {
+                        result_var: "z".to_string(),
+                        expr: crate::rule::ArithExpr {
+                            left: var("x"),
+                            op: crate::rule::ArithOp::Add,
+                            right: var("y"),
+                        },
+                    },
+                ],
+            ),
+        ]);
+        evaluate(&program, &mut db).unwrap();
+
+        let results: Vec<_> = db.scan("sum").unwrap().collect();
+        assert!(!results.is_empty());
+        // edge(1,2) → sum(1,2,3)
+        assert!(results.iter().any(|t| t[0] == Value::Int(1) && t[1] == Value::Int(2) && t[2] == Value::Int(3)));
+        // edge(2,3) → sum(2,3,5)
+        assert!(results.iter().any(|t| t[0] == Value::Int(2) && t[1] == Value::Int(3) && t[2] == Value::Int(5)));
+    }
+
+    #[test]
+    fn test_arithmetic_sub_mul() {
+        let mut db = Database::empty();
+        db.add_relation("vals", RelationSchema {
+            name: "vals".to_string(),
+            columns: vec![
+                ColumnDef { name: "x".to_string(), col_type: ColumnType::Int },
+            ],
+        });
+        db.insert("vals", smallvec![Value::Int(10)]).unwrap();
+        db.insert("vals", smallvec![Value::Int(20)]).unwrap();
+
+        let program = Program::new(vec![
+            // doubled(x, d) :- vals(x), d = x * 2.
+            Rule::new(
+                Atom::new("doubled", vec![var("x"), var("d")]),
+                vec![
+                    BodyElement::Positive(Atom::new("vals", vec![var("x")])),
+                    BodyElement::Assign {
+                        result_var: "d".to_string(),
+                        expr: crate::rule::ArithExpr {
+                            left: var("x"),
+                            op: crate::rule::ArithOp::Mul,
+                            right: int(2),
+                        },
+                    },
+                ],
+            ),
+            // decremented(x, d) :- vals(x), d = x - 1.
+            Rule::new(
+                Atom::new("decremented", vec![var("x"), var("d")]),
+                vec![
+                    BodyElement::Positive(Atom::new("vals", vec![var("x")])),
+                    BodyElement::Assign {
+                        result_var: "d".to_string(),
+                        expr: crate::rule::ArithExpr {
+                            left: var("x"),
+                            op: crate::rule::ArithOp::Sub,
+                            right: int(1),
+                        },
+                    },
+                ],
+            ),
+        ]);
+        evaluate(&program, &mut db).unwrap();
+
+        let doubled: Vec<_> = db.scan("doubled").unwrap().collect();
+        assert!(doubled.iter().any(|t| t[0] == Value::Int(10) && t[1] == Value::Int(20)));
+        assert!(doubled.iter().any(|t| t[0] == Value::Int(20) && t[1] == Value::Int(40)));
+
+        let dec: Vec<_> = db.scan("decremented").unwrap().collect();
+        assert!(dec.iter().any(|t| t[0] == Value::Int(10) && t[1] == Value::Int(9)));
+        assert!(dec.iter().any(|t| t[0] == Value::Int(20) && t[1] == Value::Int(19)));
+    }
+
+    #[test]
+    fn test_arithmetic_div_by_zero() {
+        let mut db = Database::empty();
+        db.add_relation("vals", RelationSchema {
+            name: "vals".to_string(),
+            columns: vec![
+                ColumnDef { name: "x".to_string(), col_type: ColumnType::Int },
+            ],
+        });
+        db.insert("vals", smallvec![Value::Int(10)]).unwrap();
+
+        // result(x, d) :- vals(x), d = x / 0.  (should produce no results)
+        let program = Program::new(vec![
+            Rule::new(
+                Atom::new("result", vec![var("x"), var("d")]),
+                vec![
+                    BodyElement::Positive(Atom::new("vals", vec![var("x")])),
+                    BodyElement::Assign {
+                        result_var: "d".to_string(),
+                        expr: crate::rule::ArithExpr {
+                            left: var("x"),
+                            op: crate::rule::ArithOp::Div,
+                            right: int(0),
+                        },
+                    },
+                ],
+            ),
+        ]);
+        evaluate(&program, &mut db).unwrap();
+        assert_eq!(db.relation("result").unwrap().len(), 0);
     }
 }

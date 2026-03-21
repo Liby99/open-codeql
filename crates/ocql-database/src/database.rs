@@ -41,6 +41,21 @@ impl Database {
         }
     }
 
+    /// Create a database from raw parts (used by deserialization).
+    pub fn from_parts(schema: DbScheme, strings: StringInterner, next_entity_id: u64) -> Self {
+        Self {
+            schema,
+            relations: HashMap::new(),
+            strings,
+            next_entity_id,
+        }
+    }
+
+    /// Get the next entity ID (for serialization).
+    pub fn next_entity_id(&self) -> u64 {
+        self.next_entity_id
+    }
+
     /// Create an empty database with no schema.
     pub fn empty() -> Self {
         Self {

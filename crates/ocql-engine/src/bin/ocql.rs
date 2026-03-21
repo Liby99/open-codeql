@@ -2,14 +2,16 @@
 //!
 //! Usage:
 //!   ocql <source-files...> --query <query.dl>
-//!   ocql <source-files...> --query <query.dl> --lang c|cpp|java
+//!   ocql <source-files...> --save <db-file>              # extract and save database
+//!   ocql --load <db-file> --query <query.dl>             # load database and query
 //!   ocql <source-files...> --query <query.dl> --show <table1,table2,...>
 //!   ocql <source-files...> --query <query.dl> --show-all
-//!   ocql <source-files...> --dump                         # dump all EDB tables
+//!   ocql <source-files...> --dump                        # dump all EDB tables
 //!
 //! Examples:
-//!   ocql examples/callgraph.c --query examples/callgraph.dl
-//!   ocql examples/callgraph.c --query examples/callgraph.dl --show direct_call,transitive_call
+//!   ocql examples/hello.c --query examples/callgraph.dl
+//!   ocql examples/hello.c --save hello.ocqldb
+//!   ocql --load hello.ocqldb --query examples/callgraph.dl
 //!   ocql src/*.c --query my_analysis.dl --show-all
 //!   ocql Main.java --query find_bugs.dl --lang java
 
@@ -37,6 +39,8 @@ fn main() {
     let mut show_all = false;
     let mut dump_edb = false;
     let mut verbose = false;
+    let mut save_path: Option<String> = None;
+    let mut load_path: Option<String> = None;
 
     let mut i = 0;
     while i < args.len() {
@@ -63,6 +67,14 @@ fn main() {
             "--verbose" | "-v" => {
                 verbose = true;
             }
+            "--save" => {
+                i += 1;
+                save_path = Some(args.get(i).expect("--save requires a file path").clone());
+            }
+            "--load" => {
+                i += 1;
+                load_path = Some(args.get(i).expect("--load requires a file path").clone());
+            }
             other => {
                 source_files.push(other.to_string());
             }
@@ -70,63 +82,85 @@ fn main() {
         i += 1;
     }
 
-    if source_files.is_empty() {
-        eprintln!("Error: no source files specified");
-        std::process::exit(1);
-    }
-
-    if query_file.is_none() && !dump_edb {
-        eprintln!("Error: no --query file or --dump specified");
-        std::process::exit(1);
-    }
-
-    // Detect language from file extensions if not specified
-    let lang = lang.unwrap_or_else(|| detect_language(&source_files));
-
-    // Create database and extractor
-    let (mut db, extractor): (Database, Box<dyn Extractor>) = match lang.as_str() {
-        "c" => (Database::from_schema(cpp_schema()), Box::new(CppExtractor::c())),
-        "cpp" | "c++" | "cxx" => (Database::from_schema(cpp_schema()), Box::new(CppExtractor::cpp())),
-        "java" => (Database::from_schema(java_schema()), Box::new(JavaExtractor::new())),
-        other => {
-            eprintln!("Error: unsupported language '{}' (use c, cpp, or java)", other);
+    // Get or build the database
+    let mut db = if let Some(ref load) = load_path {
+        eprintln!("Loading database from {} ...", load);
+        let db = ocql_database::load_from_file(Path::new(load))
+            .unwrap_or_else(|e| { eprintln!("Error loading database: {}", e); std::process::exit(1); });
+        let num_tables = db.relation_names().count();
+        let num_strings = db.strings.len();
+        eprintln!("Loaded database: {} tables, {} strings", num_tables, num_strings);
+        db
+    } else {
+        if source_files.is_empty() {
+            eprintln!("Error: no source files or --load specified");
             std::process::exit(1);
         }
-    };
 
-    // Extract source files
-    let mut total_files = 0;
-    let mut success_files = 0;
-    for path_str in &source_files {
-        let path = Path::new(path_str);
-        if path.is_dir() {
-            let results = extractor.extract_directory(&mut db, path);
-            for r in &results {
+        let lang_str = lang.unwrap_or_else(|| detect_language(&source_files));
+
+        let (mut db, extractor): (Database, Box<dyn Extractor>) = match lang_str.as_str() {
+            "c" => (Database::from_schema(cpp_schema()), Box::new(CppExtractor::c())),
+            "cpp" | "c++" | "cxx" => (Database::from_schema(cpp_schema()), Box::new(CppExtractor::cpp())),
+            "java" => (Database::from_schema(java_schema()), Box::new(JavaExtractor::new())),
+            other => {
+                eprintln!("Error: unsupported language '{}' (use c, cpp, or java)", other);
+                std::process::exit(1);
+            }
+        };
+
+        // Extract source files
+        let mut total_files = 0;
+        let mut success_files = 0;
+        for path_str in &source_files {
+            let path = Path::new(path_str);
+            if path.is_dir() {
+                let results = extractor.extract_directory(&mut db, path);
+                for r in &results {
+                    total_files += 1;
+                    if r.success {
+                        success_files += 1;
+                    } else {
+                        eprintln!("  FAIL: {} — {:?}", r.file_path, r.error);
+                    }
+                }
+            } else {
+                let source = std::fs::read(path)
+                    .unwrap_or_else(|e| { eprintln!("Error reading {}: {}", path_str, e); std::process::exit(1); });
+                let result = extractor.extract_source(&mut db, path_str, &source);
                 total_files += 1;
-                if r.success {
+                if result.success {
                     success_files += 1;
                 } else {
-                    eprintln!("  FAIL: {} — {:?}", r.file_path, r.error);
+                    eprintln!("  FAIL: {} — {:?}", result.file_path, result.error);
                 }
             }
-        } else {
-            let source = std::fs::read(path)
-                .unwrap_or_else(|e| { eprintln!("Error reading {}: {}", path_str, e); std::process::exit(1); });
-            let result = extractor.extract_source(&mut db, path_str, &source);
-            total_files += 1;
-            if result.success {
-                success_files += 1;
-            } else {
-                eprintln!("  FAIL: {} — {:?}", result.file_path, result.error);
-            }
+        }
+        eprintln!("Extracted {}/{} files ({})", success_files, total_files, lang_str);
+        db
+    };
+
+    // Save database if requested
+    if let Some(ref save) = save_path {
+        eprintln!("Saving database to {} ...", save);
+        ocql_database::save_to_file(&db, Path::new(save))
+            .unwrap_or_else(|e| { eprintln!("Error saving database: {}", e); std::process::exit(1); });
+        let size = std::fs::metadata(save).map(|m| m.len()).unwrap_or(0);
+        eprintln!("Saved {} bytes", size);
+        if query_file.is_none() && !dump_edb {
+            return;
         }
     }
-    eprintln!("Extracted {}/{} files ({})", success_files, total_files, lang);
 
     // Dump EDB tables if requested
     if dump_edb {
         dump_database(&db, verbose);
         return;
+    }
+
+    if query_file.is_none() {
+        eprintln!("Error: no --query file specified");
+        std::process::exit(1);
     }
 
     // Read and parse the query
@@ -194,6 +228,8 @@ fn print_usage() {
     eprintln!();
     eprintln!("Usage:");
     eprintln!("  ocql <source-files...> --query <query.dl>");
+    eprintln!("  ocql <source-files...> --save <db-file>           Save extracted database");
+    eprintln!("  ocql --load <db-file> --query <query.dl>          Load database and query");
     eprintln!("  ocql <source-files...> --query <query.dl> --show table1,table2");
     eprintln!("  ocql <source-files...> --query <query.dl> --show-all");
     eprintln!("  ocql <source-files...> --dump");
@@ -204,6 +240,8 @@ fn print_usage() {
     eprintln!("  -s, --show <tables>   Comma-separated list of tables to display");
     eprintln!("      --show-all        Show all derived tables");
     eprintln!("      --dump            Dump all extracted (EDB) tables");
+    eprintln!("      --save <file>     Save database to binary file (.ocqldb)");
+    eprintln!("      --load <file>     Load database from binary file");
     eprintln!("  -v, --verbose         Show table summary");
     eprintln!("  -h, --help            Show this help");
 }
@@ -212,7 +250,6 @@ fn detect_language(files: &[String]) -> String {
     for f in files {
         let path = Path::new(f);
         if path.is_dir() {
-            // Look at first file in directory
             continue;
         }
         match path.extension().and_then(|e| e.to_str()) {
@@ -222,7 +259,7 @@ fn detect_language(files: &[String]) -> String {
             _ => {}
         }
     }
-    "c".to_string() // default
+    "c".to_string()
 }
 
 fn dump_database(db: &Database, verbose: bool) {
@@ -243,10 +280,8 @@ fn dump_database(db: &Database, verbose: bool) {
             _ => continue,
         };
         println!("\n=== {} ({} rows) ===", name, rel.len());
-        // Print column headers
         let headers: Vec<&str> = rel.schema.columns.iter().map(|c| c.name.as_str()).collect();
         println!("{}", headers.join("\t"));
-        // Print rows
         for tuple in rel.scan() {
             let fields: Vec<String> = tuple.iter().map(|v| format_value(v, db)).collect();
             println!("{}", fields.join("\t"));

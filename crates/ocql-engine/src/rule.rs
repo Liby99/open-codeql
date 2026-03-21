@@ -38,6 +38,11 @@ pub enum BodyElement {
     Negated(Atom),
     /// Guard/filter: `x > 0`, `x = y`
     Guard(Guard),
+    /// Arithmetic assignment: `z = x + y`, `z = x * 2`
+    Assign {
+        result_var: String,
+        expr: ArithExpr,
+    },
     /// Aggregate: `result = agg(body_pred, group_by_vars, agg_var)`
     Aggregate {
         result_var: String,
@@ -46,6 +51,24 @@ pub enum BodyElement {
         group_by: Vec<String>,
         agg_var: String,
     },
+}
+
+/// An arithmetic expression.
+#[derive(Debug, Clone)]
+pub struct ArithExpr {
+    pub left: Term,
+    pub op: ArithOp,
+    pub right: Term,
+}
+
+/// Arithmetic operators.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ArithOp {
+    Add,
+    Sub,
+    Mul,
+    Div,
+    Mod,
 }
 
 /// A guard (comparison between two terms).
@@ -155,6 +178,10 @@ impl Program {
                     BodyElement::Guard(guard) => {
                         resolve_term(&mut guard.left, db);
                         resolve_term(&mut guard.right, db);
+                    }
+                    BodyElement::Assign { expr, .. } => {
+                        resolve_term(&mut expr.left, db);
+                        resolve_term(&mut expr.right, db);
                     }
                     BodyElement::Aggregate { sub_rule, .. } => {
                         resolve_terms_in_atom(&mut sub_rule.head, db);

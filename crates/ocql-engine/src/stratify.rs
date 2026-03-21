@@ -85,7 +85,7 @@ pub fn stratify(program: &Program) -> Result<Vec<Stratum>, StratificationError> 
                         }
                     }
                 }
-                BodyElement::Guard(_) => {}
+                BodyElement::Guard(_) | BodyElement::Assign { .. } => {}
             }
         }
     }

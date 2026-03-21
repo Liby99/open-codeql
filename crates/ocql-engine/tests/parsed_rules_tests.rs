@@ -261,3 +261,158 @@ fn parsed_wildcards_are_independent() {
     assert!(results.contains(&2));
     assert_eq!(results.len(), 2);
 }
+
+#[test]
+fn parsed_arithmetic_basic() {
+    let mut program = parse_program(r#"
+        edge(1, 10).
+        edge(2, 20).
+        edge(3, 30).
+
+        // sum(x, y, z) where z = x + y
+        sum_result(x, y, z) :- edge(x, y), z = x + y.
+
+        // double(x, d) where d = y * 2
+        doubled(x, d) :- edge(x, y), d = y * 2.
+
+        // Subtraction
+        diff(x, d) :- edge(x, y), d = y - x.
+    "#).unwrap();
+
+    let mut db = Database::empty();
+    program.resolve_strings(&mut db);
+    evaluate(&program, &mut db).unwrap();
+
+    // sum: edge(1,10) → (1, 10, 11), edge(2,20) → (2, 20, 22), edge(3,30) → (3, 30, 33)
+    let sums: HashSet<(i64, i64, i64)> = db.scan("sum_result").unwrap()
+        .map(|t| (t[0].as_int().unwrap(), t[1].as_int().unwrap(), t[2].as_int().unwrap()))
+        .collect();
+    assert!(sums.contains(&(1, 10, 11)));
+    assert!(sums.contains(&(2, 20, 22)));
+    assert!(sums.contains(&(3, 30, 33)));
+
+    // doubled: edge(1,10) → (1, 20), etc.
+    let dbl: HashSet<(i64, i64)> = db.scan("doubled").unwrap()
+        .map(|t| (t[0].as_int().unwrap(), t[1].as_int().unwrap()))
+        .collect();
+    assert!(dbl.contains(&(1, 20)));
+    assert!(dbl.contains(&(2, 40)));
+    assert!(dbl.contains(&(3, 60)));
+
+    // diff: edge(1,10) → (1, 9), edge(2,20) → (2, 18), edge(3,30) → (3, 27)
+    let diffs: HashSet<(i64, i64)> = db.scan("diff").unwrap()
+        .map(|t| (t[0].as_int().unwrap(), t[1].as_int().unwrap()))
+        .collect();
+    assert!(diffs.contains(&(1, 9)));
+    assert!(diffs.contains(&(2, 18)));
+    assert!(diffs.contains(&(3, 27)));
+}
+
+#[test]
+fn parsed_arithmetic_chained() {
+    // Test that arithmetic can chain with guards and other rules
+    let mut program = parse_program(r#"
+        vals(1).
+        vals(2).
+        vals(3).
+        vals(4).
+        vals(5).
+
+        // Square each value
+        squared(x, s) :- vals(x), s = x * x.
+
+        // Only keep squares > 5
+        big_square(x, s) :- squared(x, s), s > 5.
+    "#).unwrap();
+
+    let mut db = Database::empty();
+    program.resolve_strings(&mut db);
+    evaluate(&program, &mut db).unwrap();
+
+    let squares: HashSet<(i64, i64)> = db.scan("squared").unwrap()
+        .map(|t| (t[0].as_int().unwrap(), t[1].as_int().unwrap()))
+        .collect();
+    assert_eq!(squares.len(), 5);
+    assert!(squares.contains(&(1, 1)));
+    assert!(squares.contains(&(3, 9)));
+    assert!(squares.contains(&(5, 25)));
+
+    let big: HashSet<(i64, i64)> = db.scan("big_square").unwrap()
+        .map(|t| (t[0].as_int().unwrap(), t[1].as_int().unwrap()))
+        .collect();
+    assert_eq!(big.len(), 3); // 9, 16, 25
+    assert!(big.contains(&(3, 9)));
+    assert!(big.contains(&(4, 16)));
+    assert!(big.contains(&(5, 25)));
+}
+
+#[test]
+fn parsed_arithmetic_div_mod() {
+    let mut program = parse_program(r#"
+        nums(10).
+        nums(7).
+        nums(15).
+
+        half(x, h) :- nums(x), h = x / 2.
+        remainder(x, r) :- nums(x), r = x % 3.
+    "#).unwrap();
+
+    let mut db = Database::empty();
+    program.resolve_strings(&mut db);
+    evaluate(&program, &mut db).unwrap();
+
+    let halves: HashSet<(i64, i64)> = db.scan("half").unwrap()
+        .map(|t| (t[0].as_int().unwrap(), t[1].as_int().unwrap()))
+        .collect();
+    assert!(halves.contains(&(10, 5)));  // 10/2 = 5
+    assert!(halves.contains(&(7, 3)));   // 7/2 = 3 (integer division)
+    assert!(halves.contains(&(15, 7)));  // 15/2 = 7
+
+    let rems: HashSet<(i64, i64)> = db.scan("remainder").unwrap()
+        .map(|t| (t[0].as_int().unwrap(), t[1].as_int().unwrap()))
+        .collect();
+    assert!(rems.contains(&(10, 1)));  // 10%3 = 1
+    assert!(rems.contains(&(7, 1)));   // 7%3 = 1
+    assert!(rems.contains(&(15, 0)));  // 15%3 = 0
+}
+
+#[test]
+fn parsed_arithmetic_recursive_sum() {
+    // Compute cumulative sums using recursive Datalog + arithmetic
+    // Bounded by a fixed set of input values (no unbounded generation)
+    let mut program = parse_program(r#"
+        // Input values
+        val(1).
+        val(2).
+        val(3).
+
+        // Pairwise sums (bounded: only sum values that exist)
+        pair_sum(x, y, s) :- val(x), val(y), s = x + y.
+
+        // Cumulative: total = sum of all values in pairs
+        big_sum(x, y, s) :- pair_sum(x, y, s), s > 4.
+    "#).unwrap();
+
+    let mut db = Database::empty();
+    program.resolve_strings(&mut db);
+    evaluate(&program, &mut db).unwrap();
+
+    let sums: HashSet<(i64, i64, i64)> = db.scan("pair_sum").unwrap()
+        .map(|t| (t[0].as_int().unwrap(), t[1].as_int().unwrap(), t[2].as_int().unwrap()))
+        .collect();
+
+    // 3*3 = 9 pairs
+    assert_eq!(sums.len(), 9);
+    assert!(sums.contains(&(1, 1, 2)));
+    assert!(sums.contains(&(2, 3, 5)));
+    assert!(sums.contains(&(3, 3, 6)));
+
+    let big: HashSet<(i64, i64, i64)> = db.scan("big_sum").unwrap()
+        .map(|t| (t[0].as_int().unwrap(), t[1].as_int().unwrap(), t[2].as_int().unwrap()))
+        .collect();
+    // Only sums > 4: (2,3,5), (3,2,5), (3,3,6)
+    assert_eq!(big.len(), 3);
+    assert!(big.contains(&(2, 3, 5)));
+    assert!(big.contains(&(3, 2, 5)));
+    assert!(big.contains(&(3, 3, 6)));
+}
