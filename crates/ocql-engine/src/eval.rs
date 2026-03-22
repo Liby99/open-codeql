@@ -206,8 +206,8 @@ fn evaluate_rule_with_delta(
                     }
                 }
                 BodyElement::Guard(guard) => {
-                    if eval_guard(guard, bindings) {
-                        next_bindings.push(bindings.clone());
+                    if let Some(new_b) = eval_guard_binding(guard, bindings) {
+                        next_bindings.push(new_b);
                     }
                 }
                 BodyElement::Assign { result_var, expr } => {
@@ -266,8 +266,8 @@ fn evaluate_body(
                     }
                 }
                 BodyElement::Guard(guard) => {
-                    if eval_guard(guard, bindings) {
-                        next.push(bindings.clone());
+                    if let Some(new_b) = eval_guard_binding(guard, bindings) {
+                        next.push(new_b);
                     }
                 }
                 BodyElement::Assign { result_var, expr } => {
@@ -440,22 +440,48 @@ fn has_any_match(atom: &Atom, db: &Database, bindings: &Bindings) -> Result<bool
 }
 
 /// Evaluate a guard condition against current bindings.
-fn eval_guard(guard: &Guard, bindings: &Bindings) -> bool {
+/// Evaluate a guard, supporting variable binding for Eq guards.
+///
+/// When one side of an Eq guard is an unbound variable and the other side
+/// is bound, binds the unbound variable to the value. This enables patterns
+/// like `label = 100` where `label` hasn't been bound yet.
+fn eval_guard_binding(guard: &Guard, bindings: &Bindings) -> Option<Bindings> {
     let left = resolve_term(&guard.left, bindings);
     let right = resolve_term(&guard.right, bindings);
 
     match (left, right) {
         (Some(l), Some(r)) => {
-            match guard.op {
+            let pass = match guard.op {
                 CompOp::Eq => l == r,
                 CompOp::Ne => l != r,
                 CompOp::Lt => l < r,
                 CompOp::Le => l <= r,
                 CompOp::Gt => l > r,
                 CompOp::Ge => l >= r,
+            };
+            if pass { Some(bindings.clone()) } else { None }
+        }
+        (None, Some(r)) if guard.op == CompOp::Eq => {
+            // Bind left variable to right value
+            if let Term::Var(name) = &guard.left {
+                let mut new_bindings = bindings.clone();
+                new_bindings.insert(name.clone(), r);
+                Some(new_bindings)
+            } else {
+                None
             }
         }
-        _ => false, // Unbound variable in guard → fail
+        (Some(l), None) if guard.op == CompOp::Eq => {
+            // Bind right variable to left value
+            if let Term::Var(name) = &guard.right {
+                let mut new_bindings = bindings.clone();
+                new_bindings.insert(name.clone(), l);
+                Some(new_bindings)
+            } else {
+                None
+            }
+        }
+        _ => None,
     }
 }
 

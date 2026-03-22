@@ -407,6 +407,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "ocql-mir"
+version = "0.1.0"
+dependencies = [
+ "ocql-database",
+ "ocql-engine",
+ "ocql-extractor-common",
+ "ocql-extractor-cpp",
+ "ocql-ql-ast",
+ "ocql-ql-parser",
+ "ordered-float",
+]
+
+[[package]]
 name = "ocql-ql-ast"
 version = "0.1.0"
 dependencies = [

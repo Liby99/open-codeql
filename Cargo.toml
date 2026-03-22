@@ -13,6 +13,7 @@ members = [
     "crates/ocql-extractor-java",
     "crates/ocql-hir-eval",
     "crates/ocql-engine",
+    "crates/ocql-mir",
 ]
 
 [workspace.package]
