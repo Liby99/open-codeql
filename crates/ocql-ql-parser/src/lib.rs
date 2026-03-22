@@ -897,4 +897,15 @@ mod tests {
         let result = parse_source_file(&content);
         assert!(result.is_ok(), "Parse failed for Xml.qll: {:?}", result.err());
     }
+
+    #[test]
+    fn test_parse_import_qll() {
+        let path = "../../vendor/codeql/java/ql/lib/semmle/code/java/Import.qll";
+        let content = match std::fs::read_to_string(path) {
+            Ok(c) => c,
+            Err(_) => return,
+        };
+        let result = parse_source_file(&content);
+        assert!(result.is_ok(), "Parse failed for Import.qll: {:?}", result.err());
+    }
 }
