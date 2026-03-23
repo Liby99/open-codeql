@@ -3,6 +3,13 @@ use std::path::PathBuf;
 use std::time::Instant;
 
 fn main() {
+    // Spawn a thread with a larger stack to handle deeply nested QL files
+    let builder = std::thread::Builder::new().stack_size(64 * 1024 * 1024);
+    let handler = builder.spawn(real_main).unwrap();
+    handler.join().unwrap();
+}
+
+fn real_main() {
     let args: Vec<String> = std::env::args().collect();
     if args.len() < 2 {
         eprintln!("Usage: ocql-hir-eval <workspace-root> [--verbose] [--errors] [--limit N]");

@@ -22,7 +22,79 @@ fn preprocess(input: &str) -> String {
     let no_qual_args = strip_qual_chain_type_args(&no_turbofish);
     let no_nested = flatten_nested_type_args(&no_qual_args);
     let no_module_decl = strip_file_module_decl(&no_nested);
-    capitalize_keywords_as_classnames(&no_module_decl)
+    let cap_keywords = capitalize_keywords_as_classnames(&no_module_decl);
+    capitalize_lowercase_qual_prefix(&cap_keywords)
+}
+
+/// Capitalize lowercase identifiers followed by `::` (module alias references).
+///
+/// In QL, module aliases can be lowercase (e.g., `import javascript as js`), but our
+/// grammar's QualChain requires the first segment to be an UpperIdent. We capitalize
+/// `js::Foo` → `Js::Foo` so the parser sees an UpperIdent.
+fn capitalize_lowercase_qual_prefix(input: &str) -> String {
+    let bytes = input.as_bytes();
+    let mut result = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+
+    while i < bytes.len() {
+        // Skip string literals
+        if bytes[i] == b'"' {
+            result.push(bytes[i]);
+            i += 1;
+            while i < bytes.len() && bytes[i] != b'"' {
+                if bytes[i] == b'\\' && i + 1 < bytes.len() {
+                    result.push(bytes[i]);
+                    result.push(bytes[i + 1]);
+                    i += 2;
+                } else {
+                    result.push(bytes[i]);
+                    i += 1;
+                }
+            }
+            if i < bytes.len() {
+                result.push(bytes[i]);
+                i += 1;
+            }
+            continue;
+        }
+
+        // Skip line comments
+        if i + 1 < bytes.len() && bytes[i] == b'/' && bytes[i + 1] == b'/' {
+            while i < bytes.len() && bytes[i] != b'\n' {
+                result.push(bytes[i]);
+                i += 1;
+            }
+            continue;
+        }
+
+        // Check for lowercase identifier followed by ::
+        if bytes[i].is_ascii_lowercase() {
+            // Not preceded by an identifier character (word boundary)
+            let at_word_start = i == 0 || !(bytes[i - 1].is_ascii_alphanumeric() || bytes[i - 1] == b'_');
+            if at_word_start {
+                // Scan the identifier
+                let start = i;
+                while i < bytes.len() && (bytes[i].is_ascii_alphanumeric() || bytes[i] == b'_') {
+                    i += 1;
+                }
+                let ident = &bytes[start..i];
+                // Check if followed by ::
+                if i + 1 < bytes.len() && bytes[i] == b':' && bytes[i + 1] == b':' {
+                    // Capitalize the first character
+                    result.push(ident[0].to_ascii_uppercase());
+                    result.extend_from_slice(&ident[1..]);
+                } else {
+                    result.extend_from_slice(ident);
+                }
+                continue;
+            }
+        }
+
+        result.push(bytes[i]);
+        i += 1;
+    }
+
+    String::from_utf8(result).unwrap_or_else(|_| input.to_string())
 }
 
 /// Strip type arguments from qualified chain tails: `Foo<Args>::bar` → `Foo::bar`.
@@ -324,12 +396,18 @@ fn capitalize_keywords_as_classnames(input: &str) -> String {
                     || !bytes[i + kw_bytes.len()].is_ascii_alphanumeric()
                         && bytes[i + kw_bytes.len()] != b'_')
             {
-                // Check preceding context: skip whitespace backwards, then check for context word or comma
+                // Check preceding context: skip whitespace backwards, then check for context word
                 let before = &result;
                 let trimmed_end = before.iter().rposition(|&b| b != b' ' && b != b'\t' && b != b'\n' && b != b'\r');
                 if let Some(end_pos) = trimmed_end {
                     let preceding = &before[..=end_pos];
-                    let is_type_context = context_words.iter().any(|cw| {
+                    // Don't match context words inside line comments:
+                    // Find the last newline before end_pos, then check for // between it and end_pos
+                    let last_newline = preceding.iter().rposition(|&b| b == b'\n').unwrap_or(0);
+                    let line_slice = &preceding[last_newline..];
+                    let in_line_comment = line_slice.windows(2).any(|w| w == b"//");
+
+                    let is_type_context = !in_line_comment && context_words.iter().any(|cw| {
                         let cw_bytes = cw.as_bytes();
                         preceding.len() >= cw_bytes.len()
                             && &preceding[preceding.len() - cw_bytes.len()..] == cw_bytes
@@ -907,5 +985,81 @@ mod tests {
         };
         let result = parse_source_file(&content);
         assert!(result.is_ok(), "Parse failed for Import.qll: {:?}", result.err());
+    }
+
+    #[test]
+    fn test_parse_encryption_qll() {
+        let path = "../../vendor/codeql/java/ql/lib/semmle/code/java/security/Encryption.qll";
+        let content = match std::fs::read_to_string(path) {
+            Ok(c) => c,
+            Err(_) => return,
+        };
+        let result = parse_source_file(&content);
+        assert!(result.is_ok(), "Parse failed for Encryption.qll: {:?}", result.err());
+    }
+
+    #[test]
+    fn test_parse_rank_expr() {
+        let input = r#"private string rankedSecureAlgorithm(int i) { result = rank[i](getASecureAlgorithmName()) }"#;
+        let result = parse_source_file(input);
+        assert!(result.is_ok(), "Parse error: {:?}", result.err());
+    }
+
+    #[test]
+    fn test_parse_empty_predicate_body() {
+        let input = r#"
+module Foo {
+  predicate isSource(int source) { }
+}
+        "#;
+        let result = parse_source_file(input);
+        assert!(result.is_ok(), "Parse error: {:?}", result.err());
+    }
+
+    #[test]
+    fn test_parse_lowercase_import_alias() {
+        let input = r#"
+private import javascript as js
+module M {
+  private js::Function getLambda(js::LocalVariable v) {
+    result.getVariable() = v
+  }
+}
+        "#;
+        let result = parse_source_file(input);
+        assert!(result.is_ok(), "Parse error: {:?}", result.err());
+    }
+
+    #[test]
+    fn test_parse_any_expr() {
+        let input = r#"
+predicate test(int x) {
+  any(x.getAUrlPart()) instanceof Foo and x > 0
+}
+        "#;
+        let result = parse_source_file(input);
+        assert!(result.is_ok(), "Parse error: {:?}", result.err());
+    }
+
+    #[test]
+    fn test_parse_variable_capture_qll() {
+        let path = "../../vendor/codeql/javascript/ql/lib/semmle/javascript/dataflow/internal/VariableCapture.qll";
+        let content = match std::fs::read_to_string(path) {
+            Ok(c) => c,
+            Err(_) => return,
+        };
+        let result = parse_source_file(&content);
+        assert!(result.is_ok(), "Parse failed for VariableCapture.qll: {:?}", result.err());
+    }
+
+    #[test]
+    fn test_parse_grape_qll() {
+        let path = "../../vendor/codeql/ruby/ql/lib/codeql/ruby/frameworks/Grape.qll";
+        let content = match std::fs::read_to_string(path) {
+            Ok(c) => c,
+            Err(_) => return,
+        };
+        let result = parse_source_file(&content);
+        assert!(result.is_ok(), "Parse failed for Grape.qll: {:?}", result.err());
     }
 }

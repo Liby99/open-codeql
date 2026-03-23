@@ -107,7 +107,7 @@ ModuleMember: ModuleMember = {
 // ─── Imports ─────────────────────────────────────────────────────
 
 ImportDecl: Import = {
-    <l:@L> <anns:Annotation*> "import" <path:ImportPath> <alias:("as" <UpperNameRule>)?> <r:@R> => Import {
+    <l:@L> <anns:Annotation*> "import" <path:ImportPath> <alias:("as" <ImportAliasName>)?> <r:@R> => Import {
         annotations: anns,
         path,
         alias,
@@ -160,6 +160,7 @@ PredicateDecl: Predicate = {
 
 PredicateBody: Option<Formula> = {
     "{" <f:FormulaRule> "}" => Some(f),
+    "{" "}" => None,
     ";" => None,
     // Predicate equation: predicate name(params) = higherOrderPred(predRef/arity, ...)(args, ...)
     "=" <_name:AnyIdentStr> "(" <_refs:Comma<PredicateRef>> ")" "(" <_args:Comma<ExprRule>> ")" => None,
@@ -1050,17 +1051,6 @@ PrimaryExpr: Expr = {
         },
         span: Span::new(l, r),
     },
-    // Aggregation with separator: agg(vars | guard | expr, sep)
-    <l:@L> <kind:AggKindRule> "(" <vars:CommaPlus<VarDeclRule>> "|" <guard:FormulaRule> "|" <expr:ExprRule> "," <sep:ExprRule> ")" <r:@R> => Expr {
-        kind: ExprKind::Aggregation {
-            kind, vars,
-            guard: Some(Box::new(guard)),
-            expr: Some(Box::new(expr)),
-            separator: Some(Box::new(sep)),
-            order_by: vec![],
-        },
-        span: Span::new(l, r),
-    },
     // Aggregation with order by: agg(vars | guard | expr order by ...)
     <l:@L> <kind:AggKindRule> "(" <vars:CommaPlus<VarDeclRule>> "|" <guard:FormulaRule> "|" <expr:ExprRule> "order" "by" <ob:AggOrderByList> ")" <r:@R> => Expr {
         kind: ExprKind::Aggregation {
@@ -1079,6 +1069,17 @@ PrimaryExpr: Expr = {
             guard: Some(Box::new(guard)),
             expr: Some(Box::new(expr)),
             separator: None,
+            order_by: vec![],
+        },
+        span: Span::new(l, r),
+    },
+    // Aggregation with separator: agg(vars | guard | expr, sep)
+    <l:@L> <kind:AggKindRule> "(" <vars:CommaPlus<VarDeclRule>> "|" <guard:FormulaRule> "|" <expr:ExprRule> "," <sep:ExprRule> ")" <r:@R> => Expr {
+        kind: ExprKind::Aggregation {
+            kind, vars,
+            guard: Some(Box::new(guard)),
+            expr: Some(Box::new(expr)),
+            separator: Some(Box::new(sep)),
             order_by: vec![],
         },
         span: Span::new(l, r),
@@ -1295,6 +1296,17 @@ PrimaryExpr: Expr = {
         },
         span: Span::new(l, r),
     },
+    // Rank expression with just an expression: rank[i](expr)
+    <l:@L> "rank" "[" <index:ExprRule> "]" "(" <expr:ExprRule> ")" <r:@R> => Expr {
+        kind: ExprKind::RankExpr {
+            index: Box::new(index),
+            vars: vec![],
+            guard: None,
+            expr: Box::new(expr),
+            order_by: vec![],
+        },
+        span: Span::new(l, r),
+    },
     // any(Type v | guard | expr)
     <l:@L> "any" "(" <vars:CommaPlus<VarDeclRule>> "|" <guard:FormulaRule> "|" <expr:ExprRule> ")" <r:@R> => Expr {
         kind: ExprKind::AnyExpr {
@@ -1319,6 +1331,15 @@ PrimaryExpr: Expr = {
             vars,
             guard: None,
             expr: None,
+        },
+        span: Span::new(l, r),
+    },
+    // any(expr) — select all values of an expression
+    <l:@L> "any" "(" <expr:ExprRule> ")" <r:@R> => Expr {
+        kind: ExprKind::AnyExpr {
+            vars: vec![],
+            guard: None,
+            expr: Some(Box::new(expr)),
         },
         span: Span::new(l, r),
     },
@@ -1446,6 +1467,12 @@ BindingsetNameRule: LowerName = {
 
 UpperNameRule: UpperName = {
     <l:@L> <s:UpperIdentStr> <r:@R> => UpperName { name: s, span: Span::new(l, r) },
+};
+
+// Import aliases can be either upper or lower identifiers (e.g., `import foo as js`)
+ImportAliasName: UpperName = {
+    <l:@L> <s:UpperIdentStr> <r:@R> => UpperName { name: s, span: Span::new(l, r) },
+    <l:@L> <s:LowerIdentStr> <r:@R> => UpperName { name: s, span: Span::new(l, r) },
 };
 
 AnyIdentStr: String = {

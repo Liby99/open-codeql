@@ -458,6 +458,7 @@ fn discover_ql_files(
                 || name_str == "node_modules"
                 || name_str == "target"
                 || name_str == "test"
+                || name_str == "upgrades"
             {
                 continue;
             }
