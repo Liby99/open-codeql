@@ -1,0 +1,16 @@
+[package]
+name = "ocql-extractor-python"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+ocql-database = { path = "../ocql-database" }
+ocql-schema = { path = "../ocql-schema" }
+ocql-extractor-common = { path = "../ocql-extractor-common" }
+tree-sitter = "0.26"
+tree-sitter-python = "0.25"
+
+[[bin]]
+name = "extract-python"
+path = "src/bin/extract.rs"

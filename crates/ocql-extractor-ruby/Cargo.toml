@@ -1,0 +1,16 @@
+[package]
+name = "ocql-extractor-ruby"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+ocql-database = { path = "../ocql-database" }
+ocql-schema = { path = "../ocql-schema" }
+ocql-extractor-common = { path = "../ocql-extractor-common" }
+tree-sitter = "0.26"
+tree-sitter-ruby = "0.23"
+
+[[bin]]
+name = "extract-ruby"
+path = "src/bin/extract.rs"

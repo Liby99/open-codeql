@@ -1,0 +1,16 @@
+[package]
+name = "ocql-extractor-swift"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+ocql-database = { path = "../ocql-database" }
+ocql-schema = { path = "../ocql-schema" }
+ocql-extractor-common = { path = "../ocql-extractor-common" }
+tree-sitter = "0.26"
+tree-sitter-swift = "0.7"
+
+[[bin]]
+name = "extract-swift"
+path = "src/bin/extract.rs"

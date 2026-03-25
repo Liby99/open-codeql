@@ -11,10 +11,15 @@ members = [
     "crates/ocql-extractor-cpp",
     "crates/ocql-hir",
     "crates/ocql-extractor-java",
+    "crates/ocql-extractor-ruby",
     "crates/ocql-hir-eval",
     "crates/ocql-engine",
     "crates/ocql-mir",
     "crates/ocql-models",
+    "crates/ocql-extractor-csharp",
+    "crates/ocql-extractor-go",
+    "crates/ocql-extractor-rust",
+    "crates/ocql-extractor-javascript",
 ]
 
 [workspace.package]

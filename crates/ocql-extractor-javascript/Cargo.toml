@@ -1,0 +1,17 @@
+[package]
+name = "ocql-extractor-javascript"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+ocql-database = { path = "../ocql-database" }
+ocql-schema = { path = "../ocql-schema" }
+ocql-extractor-common = { path = "../ocql-extractor-common" }
+tree-sitter = "0.26"
+tree-sitter-javascript = "0.25"
+tree-sitter-typescript = "0.23"
+
+[[bin]]
+name = "extract-javascript"
+path = "src/bin/extract.rs"
