@@ -4,6 +4,10 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 
+[[bin]]
+name = "ocql-mir-eval"
+path = "src/bin/eval.rs"
+
 [dependencies]
 ocql-ql-ast = { path = "../ocql-ql-ast" }
 ocql-ql-parser = { path = "../ocql-ql-parser" }

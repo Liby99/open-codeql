@@ -1000,12 +1000,137 @@ fn lower_expr(
             lower_aggregation(ctx, *kind, vars, guard.as_deref(), expr.as_deref(), parent_pred)
         }
 
-        ExprKind::RankExpr { .. } | ExprKind::AnyExpr { .. } => {
-            Err(LowerError::Unsupported("rank/any shorthand expression".to_string()))
+        ExprKind::RankExpr { index, vars, guard, expr, order_by: _ } => {
+            // rank[i](vars | guard | expr) — shorthand for rank aggregation
+            // Lower as: auxiliary predicate for the body, then a Rank aggregate
+            // The index expression is bound to the aggregate result
+            let aux_name = ctx.fresh_pred("_rank");
+
+            // Collect outer variables from the guard
+            let mut outer_vars = Vec::new();
+            if let Some(g) = guard {
+                collect_formula_vars(g, &mut outer_vars);
+            }
+            collect_expr_vars(expr, &mut outer_vars);
+            let quant_names: Vec<&str> = vars.iter().map(|v| v.name.name.as_str()).collect();
+            outer_vars.retain(|v| !quant_names.contains(&v.as_str()));
+            outer_vars.sort();
+            outer_vars.dedup();
+
+            let agg_var_name = ctx.fresh_var();
+
+            // Build auxiliary predicate body
+            let mut inner_atoms = Vec::new();
+            if let Some(g) = guard {
+                lower_formula(ctx, g, &mut inner_atoms, &aux_name)?;
+            }
+            let (term, extra_inner) = lower_expr(ctx, expr, &aux_name)?;
+            inner_atoms.extend(extra_inner);
+            inner_atoms.push(MirAtom::Guard(MirGuard {
+                left: MirTerm::var(&agg_var_name),
+                op: MirCompOp::Eq,
+                right: term,
+            }));
+
+            let mut params: Vec<MirParam> = outer_vars.iter().map(|v| MirParam::new(v, MirType::Any)).collect();
+            params.push(MirParam::new(&agg_var_name, MirType::Any));
+            ctx.emit_predicate(MirPredicate::new(&aux_name, params, inner_atoms));
+
+            // Create the aggregate atom
+            let result_var = ctx.fresh_var();
+            let mut extra = vec![MirAtom::Aggregate(MirAggregate {
+                result_var: result_var.clone(),
+                function: MirAggFunction::Rank,
+                sub_predicate: aux_name,
+                group_by: outer_vars,
+                agg_var: agg_var_name,
+            })];
+
+            // Bind the index expression to the rank result
+            let (idx_term, idx_extra) = lower_expr(ctx, index, parent_pred)?;
+            extra.extend(idx_extra);
+            extra.push(MirAtom::Guard(MirGuard {
+                left: idx_term,
+                op: MirCompOp::Eq,
+                right: MirTerm::var(&result_var),
+            }));
+
+            Ok((MirTerm::var(&result_var), extra))
         }
 
-        ExprKind::Super { .. } => {
-            Err(LowerError::Unsupported("super expression".to_string()))
+        ExprKind::AnyExpr { vars, guard, expr } => {
+            // any(vars | guard | expr) — shorthand for any aggregation
+            // If expr is present, lower as Any aggregate over the expr
+            // If expr is absent, lower as Any aggregate over the first var
+            let aux_name = ctx.fresh_pred("_any");
+
+            let mut outer_vars = Vec::new();
+            if let Some(g) = guard {
+                collect_formula_vars(g, &mut outer_vars);
+            }
+            if let Some(e) = expr {
+                collect_expr_vars(e, &mut outer_vars);
+            }
+            let quant_names: Vec<&str> = vars.iter().map(|v| v.name.name.as_str()).collect();
+            outer_vars.retain(|v| !quant_names.contains(&v.as_str()));
+            outer_vars.sort();
+            outer_vars.dedup();
+
+            let agg_var_name = ctx.fresh_var();
+
+            let mut inner_atoms = Vec::new();
+            if let Some(g) = guard {
+                lower_formula(ctx, g, &mut inner_atoms, &aux_name)?;
+            }
+
+            if let Some(e) = expr {
+                let (term, extra_inner) = lower_expr(ctx, e, &aux_name)?;
+                inner_atoms.extend(extra_inner);
+                inner_atoms.push(MirAtom::Guard(MirGuard {
+                    left: MirTerm::var(&agg_var_name),
+                    op: MirCompOp::Eq,
+                    right: term,
+                }));
+            } else if let Some(first_var) = vars.first() {
+                // No expr: aggregate over the first quantified variable
+                inner_atoms.push(MirAtom::Guard(MirGuard {
+                    left: MirTerm::var(&agg_var_name),
+                    op: MirCompOp::Eq,
+                    right: MirTerm::var(&first_var.name.name),
+                }));
+            }
+
+            let mut params: Vec<MirParam> = outer_vars.iter().map(|v| MirParam::new(v, MirType::Any)).collect();
+            params.push(MirParam::new(&agg_var_name, MirType::Any));
+            ctx.emit_predicate(MirPredicate::new(&aux_name, params, inner_atoms));
+
+            let result_var = ctx.fresh_var();
+            let extra = vec![MirAtom::Aggregate(MirAggregate {
+                result_var: result_var.clone(),
+                function: MirAggFunction::Any,
+                sub_predicate: aux_name,
+                group_by: outer_vars,
+                agg_var: agg_var_name,
+            })];
+
+            Ok((MirTerm::var(&result_var), extra))
+        }
+
+        ExprKind::Super { super_type, name, args } => {
+            // Type.super.method(args) — dispatch to parent type's method
+            // Lower as qualified call: Type#method(this, args..., result)
+            let pred_name = format!("{}#{}", super_type.name, name.name);
+            let mut terms = vec![MirTerm::var("this")];
+            let mut extra = Vec::new();
+            for arg in args {
+                let (term, e) = lower_expr(ctx, arg, parent_pred)?;
+                extra.extend(e);
+                terms.push(term);
+            }
+            let result_var = ctx.fresh_var();
+            terms.push(MirTerm::var(&result_var));
+            extra.push(MirAtom::Scan(MirScan::new(&pred_name, terms)));
+            Ok((MirTerm::var(&result_var), extra))
         }
     }
 }
