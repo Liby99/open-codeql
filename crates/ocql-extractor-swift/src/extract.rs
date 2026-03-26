@@ -125,7 +125,16 @@ fn extract_top_level(
             extract_import(emitter, file_id, node, source);
         }
         "class_declaration" => {
-            extract_class(emitter, file_id, node, source, parent_id);
+            // tree-sitter-swift uses class_declaration for class, struct, enum,
+            // protocol, extension, and actor. Dispatch based on keyword child.
+            match find_type_keyword(node, source).as_str() {
+                "struct" => extract_struct(emitter, file_id, node, source, parent_id),
+                "enum" => extract_enum(emitter, file_id, node, source, parent_id),
+                "protocol" => extract_protocol(emitter, file_id, node, source, parent_id),
+                "extension" => extract_extension(emitter, file_id, node, source, parent_id),
+                "actor" => extract_class(emitter, file_id, node, source, parent_id),
+                _ => extract_class(emitter, file_id, node, source, parent_id),
+            }
         }
         "struct_declaration" => {
             extract_struct(emitter, file_id, node, source, parent_id);
@@ -146,6 +155,9 @@ fn extract_top_level(
         "function_declaration" => {
             extract_function(emitter, file_id, node, source, parent_id);
         }
+        "protocol_function_declaration" => {
+            extract_function(emitter, file_id, node, source, parent_id);
+        }
         "init_declaration" => {
             extract_initializer(emitter, file_id, node, source, parent_id);
         }
@@ -155,7 +167,7 @@ fn extract_top_level(
         "subscript_declaration" => {
             extract_subscript(emitter, file_id, node, source, parent_id);
         }
-        "property_declaration" => {
+        "property_declaration" | "protocol_property_declaration" => {
             extract_property(emitter, file_id, node, source, parent_id);
         }
         "typealias_declaration" => {
@@ -703,7 +715,7 @@ fn extract_type_body(
         loop {
             let child = cursor.node();
             match child.kind() {
-                "class_body" | "enum_class_body" => {
+                "class_body" | "enum_class_body" | "protocol_body" => {
                     extract_type_body_children(emitter, file_id, &child, source, type_id);
                 }
                 _ => {}
@@ -1221,7 +1233,10 @@ fn extract_statements(
         loop {
             let child = cursor.node();
             if child.is_named() {
-                if extract_stmt(emitter, file_id, &child, source, parent_id, idx).is_some() {
+                // If child is a "statements" node, recurse into it
+                if child.kind() == "statements" {
+                    extract_statements(emitter, file_id, &child, source, parent_id);
+                } else if extract_stmt(emitter, file_id, &child, source, parent_id, idx).is_some() {
                     idx += 1;
                 } else {
                     // Not a statement; try as top-level declaration
@@ -1262,10 +1277,25 @@ fn extract_stmt(
         "if_statement" => Some(STMT_IF),
         "guard_statement" => Some(STMT_GUARD),
         "switch_statement" => Some(STMT_SWITCH),
-        "for_statement" => Some(STMT_FOR_IN),
+        "for_statement" | "for_in_statement" => Some(STMT_FOR_IN),
         "while_statement" => Some(STMT_WHILE),
         "repeat_while_statement" => Some(STMT_REPEAT_WHILE),
         "return_statement" => Some(STMT_RETURN),
+        // tree-sitter-swift uses control_transfer_statement for return/throw/break/continue
+        "control_transfer_statement" => {
+            let text = node.text(source).trim_start();
+            if text.starts_with("return") {
+                Some(STMT_RETURN)
+            } else if text.starts_with("throw") {
+                Some(STMT_THROW)
+            } else if text.starts_with("break") {
+                Some(STMT_BREAK)
+            } else if text.starts_with("continue") {
+                Some(STMT_CONTINUE)
+            } else {
+                Some(STMT_RETURN) // fallback
+            }
+        }
         "throw_statement" => Some(STMT_THROW),
         "break_statement" => Some(STMT_BREAK),
         "continue_statement" => Some(STMT_CONTINUE),
@@ -1317,13 +1347,13 @@ fn extract_stmt(
         "switch_statement" => {
             extract_switch_entries(emitter, file_id, node, source, stmt_id);
         }
-        "for_statement" => {
+        "for_statement" | "for_in_statement" => {
             extract_stmt_children(emitter, file_id, node, source, stmt_id);
         }
         "while_statement" | "repeat_while_statement" => {
             extract_stmt_children(emitter, file_id, node, source, stmt_id);
         }
-        "return_statement" | "throw_statement" => {
+        "return_statement" | "throw_statement" | "control_transfer_statement" => {
             // Extract the return/throw expression
             let mut cursor = node.walk();
             if cursor.goto_first_child() {
@@ -1441,7 +1471,7 @@ fn extract_expr(
         "try_expression" => Some(EXPR_TRY),
         "await_expression" => Some(EXPR_AWAIT),
         "lambda_literal" | "closure_expression" => Some(EXPR_CLOSURE),
-        "is_expression" => Some(EXPR_IS),
+        "is_expression" | "check_expression" => Some(EXPR_IS),
         "as_expression" => Some(EXPR_AS),
         "optional_chaining_expression" => Some(EXPR_OPTIONAL_CHAIN),
         "forced_value_expression" | "force_unwrap_expression" => Some(EXPR_FORCE_UNWRAP),
@@ -1573,7 +1603,7 @@ fn extract_expr(
                 }
             }
         }
-        "is_expression" | "as_expression" => {
+        "is_expression" | "check_expression" | "as_expression" => {
             let mut cursor = node.walk();
             if cursor.goto_first_child() {
                 loop {
@@ -1645,6 +1675,35 @@ fn extract_comment(
 }
 
 // ========== Helper functions ==========
+
+/// Find the type keyword (class, struct, enum, protocol, extension, actor)
+/// inside a class_declaration node. tree-sitter-swift 0.7 uses class_declaration
+/// for all type declarations.
+fn find_type_keyword(node: &Node<'_>, source: &[u8]) -> String {
+    let mut cursor = node.walk();
+    if cursor.goto_first_child() {
+        loop {
+            let child = cursor.node();
+            // Skip modifiers node
+            if child.kind() == "modifiers" {
+                if !cursor.goto_next_sibling() { break; }
+                continue;
+            }
+            let text = child.text(source);
+            if matches!(text, "class" | "struct" | "enum" | "protocol" | "extension" | "actor") {
+                return text.to_string();
+            }
+            // Once we hit a type_identifier or body, stop looking
+            if child.kind() == "type_identifier" || child.kind() == "class_body"
+                || child.kind() == "enum_class_body" || child.kind() == "protocol_body"
+            {
+                break;
+            }
+            if !cursor.goto_next_sibling() { break; }
+        }
+    }
+    String::new()
+}
 
 /// Find the name of a declaration (class, struct, enum, protocol, function).
 fn find_declaration_name(node: &Node<'_>, source: &[u8]) -> String {
@@ -1776,7 +1835,7 @@ fn is_expression_node(node: &Node<'_>) -> bool {
         | "assignment" | "directly_assignable_expression"
         | "ternary_expression" | "try_expression" | "await_expression"
         | "lambda_literal" | "closure_expression"
-        | "is_expression" | "as_expression"
+        | "is_expression" | "check_expression" | "as_expression"
         | "optional_chaining_expression" | "forced_value_expression" | "force_unwrap_expression"
         | "interpolated_expression" | "key_path_expression"
         | "parenthesized_expression" | "interpolation"
@@ -1944,5 +2003,23 @@ mod tests {
         let has_locs: Vec<_> = db.scan("hasLocation").unwrap().collect();
         eprintln!("hasLocation: {} total", has_locs.len());
         assert!(has_locs.len() >= 5, "Should have hasLocation entries");
+    }
+
+    #[test]
+    fn test_debug_tree() {
+        let source = b"struct Point { var x: Int }\nenum Direction { case north }\nextension Point { func draw() {} }\nlet x = 1\nif true { print(x) }\n";
+        let mut parser = tree_sitter::Parser::new();
+        parser.set_language(&tree_sitter_swift::LANGUAGE.into()).unwrap();
+        let tree = parser.parse(&source[..], None).unwrap();
+        fn pt(node: &tree_sitter::Node, source: &[u8], depth: usize) {
+            if depth > 4 { return; }
+            let indent = "  ".repeat(depth);
+            let text = node.utf8_text(source).unwrap_or("").replace('\n', "\\n");
+            let short = if text.len() > 60 { format!("{}...", &text[..60]) } else { text };
+            eprintln!("{}{} [named={}] {:?}", indent, node.kind(), node.is_named(), short);
+            let mut c = node.walk();
+            if c.goto_first_child() { loop { pt(&c.node(), source, depth+1); if !c.goto_next_sibling() { break; } } }
+        }
+        pt(&tree.root_node(), &source[..], 0);
     }
 }

@@ -279,13 +279,127 @@ fn dperf_locations_valid() {
 }
 
 // ============================================================
+// coreutils — coreutils/coreutils (400+ files)
+// GNU core utilities — large-scale real-world project
+// ============================================================
+
+#[test]
+#[ignore]
+fn coreutils_extraction_succeeds() {
+    let (_, results) = extract_project("coreutils");
+    assert!(results.len() >= 100, "coreutils should have >= 100 C/H files");
+    let failures: Vec<_> = results.iter().filter(|r| !r.success).collect();
+    assert!(
+        failures.is_empty(),
+        "coreutils should have no extraction failures, got {} failures: {:?}",
+        failures.len(),
+        failures.iter().map(|f| &f.file_path).collect::<Vec<_>>()
+    );
+}
+
+#[test]
+#[ignore]
+fn coreutils_scale() {
+    let (db, _) = extract_project("coreutils");
+    let func_count = table_count(&db, "functions");
+    let type_count = table_count(&db, "usertypes");
+    let field_count = table_count(&db, "fields");
+    let param_count = table_count(&db, "params");
+
+    eprintln!("coreutils: {} functions, {} types, {} fields, {} params",
+        func_count, type_count, field_count, param_count);
+
+    assert!(func_count >= 200, "coreutils should have >= 200 functions, got {}", func_count);
+    assert!(type_count >= 20, "coreutils should have >= 20 types, got {}", type_count);
+    assert!(field_count >= 50, "coreutils should have >= 50 fields, got {}", field_count);
+    assert!(param_count >= 400, "coreutils should have >= 400 params, got {}", param_count);
+}
+
+// ============================================================
+// lua — lua/lua (~30 files)
+// Lua programming language implementation
+// ============================================================
+
+#[test]
+#[ignore]
+fn lua_extraction_succeeds() {
+    let (_, results) = extract_project("lua");
+    assert!(results.len() >= 20, "lua should have >= 20 C/H files");
+    assert!(
+        results.iter().all(|r| r.success),
+        "All lua files should extract successfully"
+    );
+}
+
+#[test]
+#[ignore]
+fn lua_core_functions() {
+    let (db, _) = extract_project("lua");
+    let names = column_strings(&db, "functions", 1);
+    assert!(names.len() >= 100, "lua should have >= 100 functions, got {}", names.len());
+    // Check for known Lua API functions
+    assert!(
+        names.contains(&"lua_newstate".into()) || names.contains(&"luaL_openlibs".into()),
+        "should have lua_newstate or luaL_openlibs"
+    );
+}
+
+#[test]
+#[ignore]
+fn lua_types() {
+    let (db, _) = extract_project("lua");
+    let type_count = table_count(&db, "usertypes");
+    assert!(type_count >= 10, "lua should have >= 10 types, got {}", type_count);
+}
+
+// ============================================================
+// libpng — glennrp/libpng (~20 files)
+// PNG reference library
+// ============================================================
+
+#[test]
+#[ignore]
+fn libpng_extraction_succeeds() {
+    let (_, results) = extract_project("libpng");
+    assert!(results.len() >= 15, "libpng should have >= 15 C/H files");
+    assert!(
+        results.iter().all(|r| r.success),
+        "All libpng files should extract successfully"
+    );
+}
+
+#[test]
+#[ignore]
+fn libpng_functions() {
+    let (db, _) = extract_project("libpng");
+    let names = column_strings(&db, "functions", 1);
+    assert!(names.len() >= 50, "libpng should have >= 50 functions, got {}", names.len());
+    // Check for known PNG API functions
+    let png_funcs: Vec<_> = names.iter().filter(|n| n.starts_with("png_")).collect();
+    assert!(
+        png_funcs.len() >= 20,
+        "libpng should have >= 20 png_* functions, got {}: {:?}",
+        png_funcs.len(),
+        png_funcs
+    );
+}
+
+#[test]
+#[ignore]
+fn libpng_types() {
+    let (db, _) = extract_project("libpng");
+    let type_count = table_count(&db, "usertypes");
+    assert!(type_count >= 5, "libpng should have >= 5 types, got {}", type_count);
+}
+
+// ============================================================
 // Cross-project summary (for manual inspection)
 // ============================================================
 
 #[test]
 #[ignore]
 fn all_projects_summary() {
-    let repos = ["qoi", "rax", "utf8.h", "lua-cjson", "dperf"];
+    let repos = ["qoi", "rax", "utf8.h", "lua-cjson", "dperf", "coreutils", "lua", "libpng"];
 
     eprintln!("\n{:<12} {:>5} {:>6} {:>6} {:>6} {:>6} {:>6} {:>6}",
         "Project", "Files", "Funcs", "Types", "Fields", "Params", "Vars", "Incls");

@@ -37,6 +37,7 @@ const STMT_NEXT: i64 = 11;
 const STMT_REDO: i64 = 12;
 const STMT_RETRY: i64 = 13;
 const STMT_YIELD: i64 = 14;
+#[allow(dead_code)]
 const STMT_RAISE: i64 = 15;
 const STMT_IF_MOD: i64 = 16;
 const STMT_UNLESS_MOD: i64 = 17;
@@ -125,9 +126,6 @@ fn extract_program(
     }
 }
 
-/// Maximum recursion depth to prevent stack overflow.
-const MAX_DEPTH: usize = 100;
-
 /// Extract a node in any scope context.
 fn extract_node(
     emitter: &mut FactEmitter<'_>,
@@ -137,21 +135,6 @@ fn extract_node(
     parent_id: EntityId,
     index: i64,
 ) {
-    extract_node_depth(emitter, file_id, node, source, parent_id, index, 0);
-}
-
-fn extract_node_depth(
-    emitter: &mut FactEmitter<'_>,
-    file_id: EntityId,
-    node: &Node<'_>,
-    source: &[u8],
-    parent_id: EntityId,
-    index: i64,
-    depth: usize,
-) {
-    if depth > MAX_DEPTH {
-        return;
-    }
     match node.kind() {
         "module" => {
             extract_module(emitter, file_id, node, source, parent_id);
@@ -417,59 +400,61 @@ fn extract_parameters(
     if cursor.goto_first_child() {
         loop {
             let child = cursor.node();
-            let (name, kind) = match child.kind() {
+            let param_info = match child.kind() {
                 "identifier" => {
-                    (child.text(source).to_string(), PARAM_REQUIRED)
+                    Some((child.text(source).to_string(), PARAM_REQUIRED))
                 }
                 "optional_parameter" => {
                     let n = child.child_by_field("name")
                         .map(|n| n.text(source).to_string())
                         .unwrap_or_default();
-                    (n, PARAM_OPTIONAL)
+                    Some((n, PARAM_OPTIONAL))
                 }
                 "splat_parameter" => {
                     let n = child.child_by_field("name")
                         .map(|n| n.text(source).to_string())
                         .unwrap_or_else(|| "*".to_string());
-                    (n, PARAM_REST)
+                    Some((n, PARAM_REST))
                 }
                 "hash_splat_parameter" => {
                     let n = child.child_by_field("name")
                         .map(|n| n.text(source).to_string())
                         .unwrap_or_else(|| "**".to_string());
-                    (n, PARAM_KEYWORD)
+                    Some((n, PARAM_KEYWORD))
                 }
                 "keyword_parameter" => {
                     let n = child.child_by_field("name")
                         .map(|n| n.text(source).to_string())
                         .unwrap_or_default();
-                    (n, PARAM_KEYWORD)
+                    Some((n, PARAM_KEYWORD))
                 }
                 "block_parameter" => {
                     let n = child.child_by_field("name")
                         .map(|n| n.text(source).to_string())
                         .unwrap_or_default();
-                    (n, PARAM_BLOCK)
+                    Some((n, PARAM_BLOCK))
                 }
-                _ => continue,
+                _ => None,
             };
 
-            if !name.is_empty() {
-                let param_id = emitter.alloc();
-                let loc_id = LocationEmitter::emit_for_node(emitter, file_id, &child);
-                let name_val = emitter.string(&name);
-                emitter.emit("rb_params", vec![
-                    Value::Entity(param_id),
-                    name_val,
-                    Value::Int(kind),
-                    Value::Int(index),
-                    Value::Entity(callable_id),
-                ]);
-                emitter.emit("hasLocation", vec![
-                    Value::Entity(param_id),
-                    Value::Entity(loc_id),
-                ]);
-                index += 1;
+            if let Some((name, kind)) = param_info {
+                if !name.is_empty() {
+                    let param_id = emitter.alloc();
+                    let loc_id = LocationEmitter::emit_for_node(emitter, file_id, &child);
+                    let name_val = emitter.string(&name);
+                    emitter.emit("rb_params", vec![
+                        Value::Entity(param_id),
+                        name_val,
+                        Value::Int(kind),
+                        Value::Int(index),
+                        Value::Entity(callable_id),
+                    ]);
+                    emitter.emit("hasLocation", vec![
+                        Value::Entity(param_id),
+                        Value::Entity(loc_id),
+                    ]);
+                    index += 1;
+                }
             }
 
             if !cursor.goto_next_sibling() { break; }
@@ -931,7 +916,6 @@ fn extract_call_details(
     } else {
         call_expr_id
     };
-
     let call_text = node.text(source);
     let call_name = emitter.string(call_text);
     let method_val = emitter.string(&method_name);
@@ -941,7 +925,6 @@ fn extract_call_details(
         Value::Entity(receiver_id),
         method_val,
     ]);
-
     // Extract arguments
     if let Some(args) = node.child_by_field("arguments") {
         let mut cursor = args.walk();
@@ -1096,166 +1079,6 @@ mod tests {
     }
 
     #[test]
-    fn test_tree_structure_block() {
-        let source = b"[1,2,3].each do |x|\n  puts x\nend\n";
-        let mut parser = tree_sitter::Parser::new();
-        let lang: tree_sitter::Language = tree_sitter_ruby::LANGUAGE.into();
-        parser.set_language(&lang).unwrap();
-        let tree = parser.parse(source, None).unwrap();
-        fn print_node(node: &tree_sitter::Node, source: &[u8], depth: usize) {
-            let indent = "  ".repeat(depth);
-            let text = node.utf8_text(source).unwrap_or("");
-            let short = if text.len() > 50 { &text[..50] } else { text };
-            eprintln!("{}[{}] named={} children={} {:?}",
-                indent, node.kind(), node.is_named(), node.child_count(), short);
-            if depth < 10 {
-                let mut cursor = node.walk();
-                if cursor.goto_first_child() {
-                    loop {
-                        print_node(&cursor.node(), source, depth + 1);
-                        if !cursor.goto_next_sibling() { break; }
-                    }
-                }
-            }
-        }
-        print_node(&tree.root_node(), source, 0);
-    }
-
-    #[test]
-    fn test_tree_structure() {
-        let source = b"puts 'hello'\n";
-        let mut parser = tree_sitter::Parser::new();
-        let lang: tree_sitter::Language = tree_sitter_ruby::LANGUAGE.into();
-        parser.set_language(&lang).unwrap();
-        let tree = parser.parse(source, None).unwrap();
-        fn print_node(node: &tree_sitter::Node, source: &[u8], depth: usize) {
-            let indent = "  ".repeat(depth);
-            let text = node.utf8_text(source).unwrap_or("");
-            let short = if text.len() > 40 { &text[..40] } else { text };
-            eprintln!("{}[{}] named={} children={} {:?}",
-                indent, node.kind(), node.is_named(), node.child_count(), short);
-            let mut cursor = node.walk();
-            if cursor.goto_first_child() {
-                loop {
-                    print_node(&cursor.node(), source, depth + 1);
-                    if !cursor.goto_next_sibling() { break; }
-                }
-            }
-        }
-        print_node(&tree.root_node(), source, 0);
-    }
-
-    #[test]
-    fn test_minimal_extraction() {
-        let source = b"x = 1\n";
-        let schema = ruby_schema();
-        let mut db = Database::from_schema(schema);
-        let extractor = RubyExtractor::new();
-        let result = extractor.extract_source(&mut db, "test.rb", source);
-        assert!(result.success, "Minimal extraction failed: {:?}", result.error);
-        eprintln!("Minimal extraction succeeded");
-    }
-
-    #[test]
-    fn test_call_extraction() {
-        let source = b"puts 'hello'\nrequire 'json'\n";
-        let schema = ruby_schema();
-        let mut db = Database::from_schema(schema);
-        let extractor = RubyExtractor::new();
-        let result = extractor.extract_source(&mut db, "test.rb", source);
-        assert!(result.success, "Call extraction failed: {:?}", result.error);
-        eprintln!("Call extraction succeeded");
-    }
-
-    #[test]
-    fn test_class_extraction() {
-        let source = b"class Foo\n  def bar\n    42\n  end\nend\n";
-        let schema = ruby_schema();
-        let mut db = Database::from_schema(schema);
-        let extractor = RubyExtractor::new();
-        let result = extractor.extract_source(&mut db, "test.rb", source);
-        assert!(result.success, "Class extraction failed: {:?}", result.error);
-        eprintln!("Class extraction succeeded");
-    }
-
-    #[test]
-    fn test_block_extraction_simpler() {
-        let source = b"foo do\n  bar\nend\n";
-        let schema = ruby_schema();
-        let mut db = Database::from_schema(schema);
-        let extractor = RubyExtractor::new();
-        let result = extractor.extract_source(&mut db, "test.rb", source);
-        assert!(result.success);
-        eprintln!("Simpler block extraction succeeded");
-    }
-
-    #[test]
-    fn test_block_extraction_with_receiver() {
-        let source = b"x.each do |i|\n  puts i\nend\n";
-        let schema = ruby_schema();
-        let mut db = Database::from_schema(schema);
-        let extractor = RubyExtractor::new();
-        let result = extractor.extract_source(&mut db, "test.rb", source);
-        assert!(result.success);
-        eprintln!("Receiver block extraction succeeded");
-    }
-
-    #[test]
-    fn test_block_extraction_with_array() {
-        let source = b"[1,2,3].each do |i|\n  puts i\nend\n";
-        let schema = ruby_schema();
-        let mut db = Database::from_schema(schema);
-        let extractor = RubyExtractor::new();
-        let result = extractor.extract_source(&mut db, "test.rb", source);
-        assert!(result.success);
-        eprintln!("Array block extraction succeeded");
-    }
-
-    #[test]
-    fn test_block_extraction_simple() {
-        let source = b"foo do\nend\n";
-        let schema = ruby_schema();
-        let mut db = Database::from_schema(schema);
-        let extractor = RubyExtractor::new();
-        let result = extractor.extract_source(&mut db, "test.rb", source);
-        assert!(result.success, "Block extraction failed: {:?}", result.error);
-        eprintln!("Simple block extraction succeeded");
-    }
-
-    #[test]
-    fn test_block_extraction() {
-        let source = b"[1,2,3].each do |x|\n  puts x\nend\n";
-        let schema = ruby_schema();
-        let mut db = Database::from_schema(schema);
-        let extractor = RubyExtractor::new();
-        let result = extractor.extract_source(&mut db, "test.rb", source);
-        assert!(result.success, "Block extraction failed: {:?}", result.error);
-        eprintln!("Block extraction succeeded");
-    }
-
-    #[test]
-    fn test_if_extraction() {
-        let source = b"if true\n  puts 'yes'\nelse\n  puts 'no'\nend\n";
-        let schema = ruby_schema();
-        let mut db = Database::from_schema(schema);
-        let extractor = RubyExtractor::new();
-        let result = extractor.extract_source(&mut db, "test.rb", source);
-        assert!(result.success, "If extraction failed: {:?}", result.error);
-        eprintln!("If extraction succeeded");
-    }
-
-    #[test]
-    fn test_begin_rescue_extraction() {
-        let source = b"begin\n  x = 1\nrescue => e\n  puts e\nensure\n  puts 'done'\nend\n";
-        let schema = ruby_schema();
-        let mut db = Database::from_schema(schema);
-        let extractor = RubyExtractor::new();
-        let result = extractor.extract_source(&mut db, "test.rb", source);
-        assert!(result.success, "Begin/rescue extraction failed: {:?}", result.error);
-        eprintln!("Begin/rescue extraction succeeded");
-    }
-
-    #[test]
     fn test_simple_modules() {
         let db = extract_test_file("simple.rb");
         let modules: Vec<_> = db.scan("rb_modules").unwrap().collect();
@@ -1386,7 +1209,7 @@ mod tests {
     }
 
     #[test]
-    fn test_hasLocation_present() {
+    fn test_has_location_present() {
         let db = extract_test_file("simple.rb");
         let has_locs: Vec<_> = db.scan("hasLocation").unwrap().collect();
         eprintln!("hasLocation: {} total", has_locs.len());

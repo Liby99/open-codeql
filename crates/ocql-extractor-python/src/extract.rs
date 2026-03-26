@@ -98,6 +98,21 @@ const PARAM_KEYWORD_ONLY_SEP: i64 = 5;
 const IMPORT_REGULAR: i64 = 0;
 const IMPORT_FROM: i64 = 1;
 
+/// Find a direct child of a node by its kind.
+fn find_child_by_kind<'a>(node: &Node<'a>, kind: &str) -> Option<Node<'a>> {
+    let mut cursor = node.walk();
+    if cursor.goto_first_child() {
+        loop {
+            let child = cursor.node();
+            if child.kind() == kind {
+                return Some(child);
+            }
+            if !cursor.goto_next_sibling() { break; }
+        }
+    }
+    None
+}
+
 impl Extractor for PythonExtractor {
     fn language(&self) -> Language {
         tree_sitter_python::LANGUAGE.into()
@@ -406,6 +421,34 @@ fn extract_decorated_definition(
     }
 }
 
+/// Extract the body from a clause node (except, finally, else).
+/// Tries field "body" first, then looks for a block child as fallback.
+fn extract_clause_body(
+    emitter: &mut FactEmitter<'_>,
+    file_id: EntityId,
+    scope_id: EntityId,
+    clause: &Node<'_>,
+    source: &[u8],
+) {
+    // Try the "body" field first
+    if let Some(body) = clause.child_by_field("body") {
+        extract_body(emitter, file_id, scope_id, &body, source);
+        return;
+    }
+    // Fallback: find the last named child that is a block
+    let mut cursor = clause.walk();
+    if cursor.goto_first_child() {
+        loop {
+            let child = cursor.node();
+            if child.is_named() && child.kind() == "block" {
+                extract_body(emitter, file_id, scope_id, &child, source);
+                return;
+            }
+            if !cursor.goto_next_sibling() { break; }
+        }
+    }
+}
+
 /// Extract a body block (suite of statements).
 fn extract_body(
     emitter: &mut FactEmitter<'_>,
@@ -482,16 +525,16 @@ fn extract_parameters(
                     index += 1;
                 }
                 "list_splat_pattern" => {
-                    // *args
-                    let name = child.child(0)
+                    // *args — find the identifier child
+                    let name = find_child_by_kind(&child, "identifier")
                         .map(|n| n.text(source).to_string())
                         .unwrap_or_else(|| "*".to_string());
                     emit_parameter(emitter, file_id, func_id, &child, &name, index, PARAM_ARGS, None, None);
                     index += 1;
                 }
                 "dictionary_splat_pattern" => {
-                    // **kwargs
-                    let name = child.child(0)
+                    // **kwargs — find the identifier child
+                    let name = find_child_by_kind(&child, "identifier")
                         .map(|n| n.text(source).to_string())
                         .unwrap_or_else(|| "**".to_string());
                     emit_parameter(emitter, file_id, func_id, &child, &name, index, PARAM_KWARGS, None, None);
@@ -663,49 +706,58 @@ fn extract_import_from(
         Value::Entity(loc_id),
     ]);
 
-    // Extract imported names
+    // Extract imported names — find names after the "import" keyword
     let mut name_idx = 0i64;
+    let mut past_import = false;
     let mut cursor = node.walk();
     if cursor.goto_first_child() {
         loop {
             let child = cursor.node();
-            match child.kind() {
-                "dotted_name" | "relative_import" => {
-                    // This is the module_name, already extracted above
-                }
-                "wildcard_import" => {
-                    let name_val = emitter.string("*");
-                    let alias_val = emitter.string("");
-                    emitter.emit("py_import_names", vec![
-                        Value::Entity(import_id),
-                        Value::Int(name_idx),
-                        name_val,
-                        alias_val,
-                    ]);
-                    name_idx += 1;
-                }
-                "aliased_import" => {
-                    let name = child.child_by_field("name")
-                        .map(|n| n.text(source).to_string())
-                        .unwrap_or_default();
-                    let alias = child.child_by_field("alias")
-                        .map(|n| n.text(source).to_string())
-                        .unwrap_or_default();
-                    let name_val = emitter.string(&name);
-                    let alias_val = emitter.string(&alias);
-                    emitter.emit("py_import_names", vec![
-                        Value::Entity(import_id),
-                        Value::Int(name_idx),
-                        name_val,
-                        alias_val,
-                    ]);
-                    name_idx += 1;
-                }
-                _ => {
-                    // Handle bare identifiers in `from x import y, z`
-                    if child.is_named() && child.kind() == "identifier" {
-                        // Skip "import" keyword
+            if child.kind() == "import" {
+                past_import = true;
+            } else if past_import {
+                match child.kind() {
+                    "dotted_name" => {
+                        let name = child.text(source).to_string();
+                        let name_val = emitter.string(&name);
+                        let alias_val = emitter.string("");
+                        emitter.emit("py_import_names", vec![
+                            Value::Entity(import_id),
+                            Value::Int(name_idx),
+                            name_val,
+                            alias_val,
+                        ]);
+                        name_idx += 1;
                     }
+                    "wildcard_import" => {
+                        let name_val = emitter.string("*");
+                        let alias_val = emitter.string("");
+                        emitter.emit("py_import_names", vec![
+                            Value::Entity(import_id),
+                            Value::Int(name_idx),
+                            name_val,
+                            alias_val,
+                        ]);
+                        name_idx += 1;
+                    }
+                    "aliased_import" => {
+                        let name = child.child_by_field("name")
+                            .map(|n| n.text(source).to_string())
+                            .unwrap_or_default();
+                        let alias = child.child_by_field("alias")
+                            .map(|n| n.text(source).to_string())
+                            .unwrap_or_default();
+                        let name_val = emitter.string(&name);
+                        let alias_val = emitter.string(&alias);
+                        emitter.emit("py_import_names", vec![
+                            Value::Entity(import_id),
+                            Value::Int(name_idx),
+                            name_val,
+                            alias_val,
+                        ]);
+                        name_idx += 1;
+                    }
+                    _ => {}
                 }
             }
             if !cursor.goto_next_sibling() { break; }
@@ -846,7 +898,24 @@ fn extract_stmt(
             if let Some(body) = node.child_by_field("body") {
                 extract_body(emitter, file_id, scope_id, &body, source);
             }
-            // Except clauses, finally, else handled implicitly through body extraction
+            // Extract except clauses, finally, and else blocks
+            let mut cursor = node.walk();
+            if cursor.goto_first_child() {
+                loop {
+                    let child = cursor.node();
+                    match child.kind() {
+                        "except_clause" | "except_group_clause" => {
+                            // Extract the block (suite) inside the except clause
+                            extract_clause_body(emitter, file_id, scope_id, &child, source);
+                        }
+                        "finally_clause" | "else_clause" => {
+                            extract_clause_body(emitter, file_id, scope_id, &child, source);
+                        }
+                        _ => {}
+                    }
+                    if !cursor.goto_next_sibling() { break; }
+                }
+            }
         }
         "raise_statement" => {
             let mut cursor = node.walk();
@@ -1533,4 +1602,5 @@ mod tests {
         let files: Vec<_> = db.scan("files").unwrap().collect();
         assert_eq!(files.len(), 1, "Should have exactly 1 file");
     }
+
 }

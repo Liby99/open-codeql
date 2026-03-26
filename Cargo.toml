@@ -20,6 +20,9 @@ members = [
     "crates/ocql-extractor-go",
     "crates/ocql-extractor-rust",
     "crates/ocql-extractor-javascript",
+    "crates/ocql-extractor-python",
+    "crates/ocql-extractor-swift",
+    "crates/ocodeql",
 ]
 
 [workspace.package]
