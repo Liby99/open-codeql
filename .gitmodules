@@ -31,3 +31,72 @@
 [submodule "vendor/test-repos/auto-value-moshi"]
 	path = vendor/test-repos/auto-value-moshi
 	url = https://github.com/rharter/auto-value-moshi.git
+[submodule "vendor/test-repos/flask"]
+	path = vendor/test-repos/flask
+	url = https://github.com/pallets/flask.git
+[submodule "vendor/test-repos/httpie"]
+	path = vendor/test-repos/httpie
+	url = https://github.com/httpie/cli.git
+[submodule "vendor/test-repos/libpng"]
+	path = vendor/test-repos/libpng
+	url = https://github.com/glennrp/libpng.git
+[submodule "vendor/test-repos/lua"]
+	path = vendor/test-repos/lua
+	url = https://github.com/lua/lua.git
+[submodule "vendor/test-repos/black"]
+	path = vendor/test-repos/black
+	url = https://github.com/psf/black.git
+[submodule "vendor/test-repos/coreutils"]
+	path = vendor/test-repos/coreutils
+	url = https://github.com/coreutils/coreutils.git
+[submodule "vendor/test-repos/fzf"]
+	path = vendor/test-repos/fzf
+	url = https://github.com/junegunn/fzf.git
+[submodule "vendor/test-repos/express"]
+	path = vendor/test-repos/express
+	url = https://github.com/expressjs/express.git
+[submodule "vendor/test-repos/preact"]
+	path = vendor/test-repos/preact
+	url = https://github.com/preactjs/preact.git
+[submodule "vendor/test-repos/zod"]
+	path = vendor/test-repos/zod
+	url = https://github.com/colinhacks/zod.git
+[submodule "vendor/test-repos/lazygit"]
+	path = vendor/test-repos/lazygit
+	url = https://github.com/jesseduffield/lazygit.git
+[submodule "vendor/test-repos/devise"]
+	path = vendor/test-repos/devise
+	url = https://github.com/heartcombo/devise.git
+[submodule "vendor/test-repos/Humanizer"]
+	path = vendor/test-repos/Humanizer
+	url = https://github.com/Humanizr/Humanizer.git
+[submodule "vendor/test-repos/ripgrep"]
+	path = vendor/test-repos/ripgrep
+	url = https://github.com/BurntSushi/ripgrep.git
+[submodule "vendor/test-repos/jekyll"]
+	path = vendor/test-repos/jekyll
+	url = https://github.com/jekyll/jekyll.git
+[submodule "vendor/test-repos/Newtonsoft.Json"]
+	path = vendor/test-repos/Newtonsoft.Json
+	url = https://github.com/JamesNK/Newtonsoft.Json.git
+[submodule "vendor/test-repos/rack"]
+	path = vendor/test-repos/rack
+	url = https://github.com/rack/rack.git
+[submodule "vendor/test-repos/fd"]
+	path = vendor/test-repos/fd
+	url = https://github.com/sharkdp/fd.git
+[submodule "vendor/test-repos/vapor"]
+	path = vendor/test-repos/vapor
+	url = https://github.com/vapor/vapor.git
+[submodule "vendor/test-repos/Alamofire"]
+	path = vendor/test-repos/Alamofire
+	url = https://github.com/Alamofire/Alamofire.git
+[submodule "vendor/test-repos/bat"]
+	path = vendor/test-repos/bat
+	url = https://github.com/sharkdp/bat.git
+[submodule "vendor/test-repos/Kingfisher"]
+	path = vendor/test-repos/Kingfisher
+	url = https://github.com/onevcat/Kingfisher.git
+[submodule "vendor/test-repos/hugo"]
+	path = vendor/test-repos/hugo
+	url = https://github.com/gohugoio/hugo.git
