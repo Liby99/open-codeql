@@ -11,13 +11,15 @@
 //! 4. **Expression lowering** — Literals, arithmetic, calls, etc.
 //! 5. **Select lowering** — from/where/select → result predicate
 
+use std::collections::{HashMap, HashSet};
+
 use ocql_ql_ast::expr::{Expr, ExprKind, VarDecl};
 use ocql_ql_ast::formula::{Formula, FormulaKind};
 use ocql_ql_ast::module::{ClassDecl, ClassMember, ModuleMember, SourceFile};
 use ocql_ql_ast::predicate::Predicate;
 use ocql_ql_ast::query::Select;
-use ocql_ql_ast::ty::TypeExprKind;
-use ocql_ql_ast::{BinOp, Literal};
+use ocql_ql_ast::ty::{TypeExpr, TypeExprKind};
+use ocql_ql_ast::{BinOp, ClosureOp, Literal};
 
 use crate::nodes::*;
 
@@ -52,6 +54,10 @@ pub struct LowerCtx {
     fresh_pred: u32,
     /// Accumulated predicates.
     predicates: Vec<MirPredicate>,
+    /// Variable → class name mapping for resolving member calls.
+    /// When a variable is declared with a class type (e.g., `from Function f`),
+    /// we record `f → "Function"` so that `f.getName()` resolves to `Function#getName`.
+    var_types: HashMap<String, String>,
 }
 
 impl LowerCtx {
@@ -60,6 +66,7 @@ impl LowerCtx {
             fresh_var: 0,
             fresh_pred: 0,
             predicates: Vec::new(),
+            var_types: HashMap::new(),
         }
     }
 
@@ -79,10 +86,100 @@ impl LowerCtx {
         self.predicates.push(pred);
     }
 
+    /// Register a class-typed variable and emit its characteristic predicate constraint.
+    fn register_class_var(&mut self, var_name: &str, class_name: &str, atoms: &mut Vec<MirAtom>) {
+        self.var_types.insert(var_name.to_string(), class_name.to_string());
+        atoms.push(MirAtom::Scan(MirScan::new(
+            &format!("{}#char", class_name),
+            vec![MirTerm::var(var_name)],
+        )));
+    }
+
+    /// Resolve a member call name. If the receiver is a known class-typed variable,
+    /// qualify the method name (e.g., `getName` → `Function#getName`).
+    fn resolve_member_call(&self, recv_term: &MirTerm, method_name: &str) -> String {
+        if let MirTerm::Var(var_name) = recv_term {
+            if let Some(class_name) = self.var_types.get(var_name) {
+                return format!("{}#{}", class_name, method_name);
+            }
+        }
+        // Fallback: use unqualified name (best-effort for unknown receivers)
+        method_name.to_string()
+    }
+
     pub fn into_program(self) -> MirProgram {
         MirProgram {
             predicates: self.predicates,
         }
+    }
+
+    /// Generate a transitive closure predicate for the given base predicate name.
+    /// Returns the name of the generated TC predicate.
+    ///
+    /// For `ClosureOp::Plus`: generates
+    ///   _tc_P(a, b) :- P(a, b).
+    ///   _tc_P(a, b) :- P(a, c), _tc_P(c, b).
+    ///
+    /// For `ClosureOp::Star`: additionally generates
+    ///   _tc_P(a, a) :- P(a, _).
+    fn generate_tc_predicate(&mut self, base_pred: &str, closure: ClosureOp) -> String {
+        let tc_name = format!("_tc_{}", base_pred);
+
+        // Check if we already generated this TC predicate
+        if self.predicates.iter().any(|p| p.name == tc_name) {
+            return tc_name;
+        }
+
+        let params = vec![
+            MirParam::new("_tc_a", MirType::Any),
+            MirParam::new("_tc_b", MirType::Any),
+        ];
+
+        // Base case: _tc_P(a, b) :- P(a, b).
+        let base_clause = vec![MirAtom::Scan(MirScan::new(
+            base_pred,
+            vec![MirTerm::var("_tc_a"), MirTerm::var("_tc_b")],
+        ))];
+
+        // Recursive case: _tc_P(a, b) :- P(a, c), _tc_P(c, b).
+        let rec_clause = vec![
+            MirAtom::Scan(MirScan::new(
+                base_pred,
+                vec![MirTerm::var("_tc_a"), MirTerm::var("_tc_c")],
+            )),
+            MirAtom::Scan(MirScan::new(
+                &tc_name,
+                vec![MirTerm::var("_tc_c"), MirTerm::var("_tc_b")],
+            )),
+        ];
+
+        let mut clauses = vec![base_clause, rec_clause];
+
+        // For Star (reflexive): _tc_P(a, a) :- P(a, _).
+        if closure == ClosureOp::Star {
+            let reflexive_clause = vec![
+                MirAtom::Scan(MirScan::new(
+                    base_pred,
+                    vec![MirTerm::var("_tc_a"), MirTerm::Wildcard],
+                )),
+                MirAtom::Guard(MirGuard {
+                    left: MirTerm::var("_tc_b"),
+                    op: MirCompOp::Eq,
+                    right: MirTerm::var("_tc_a"),
+                }),
+            ];
+            clauses.push(reflexive_clause);
+        }
+
+        self.emit_predicate(MirPredicate {
+            name: tc_name.clone(),
+            params,
+            body: MirBody::Disjunction(clauses),
+            annotations: MirAnnotations::default(),
+            is_abstract: false,
+        });
+
+        tc_name
     }
 }
 
@@ -98,7 +195,26 @@ pub fn lower_source_file(file: &SourceFile) -> Result<MirProgram, LowerError> {
         lower_member(&mut ctx, member)?;
     }
 
-    Ok(ctx.into_program())
+    let mut program = ctx.into_program();
+    generate_dispatch_predicates(&mut program);
+    Ok(program)
+}
+
+/// Lower multiple QL source files into a single merged MIR program.
+/// All predicates from all files are merged into one program.
+/// This is used for project-wide compilation where imports have been resolved.
+pub fn lower_source_files(files: &[&SourceFile]) -> Result<MirProgram, LowerError> {
+    let mut ctx = LowerCtx::new();
+
+    for file in files {
+        for member in &file.members {
+            lower_member(&mut ctx, member)?;
+        }
+    }
+
+    let mut program = ctx.into_program();
+    generate_dispatch_predicates(&mut program);
+    Ok(program)
 }
 
 fn lower_member(ctx: &mut LowerCtx, member: &ModuleMember) -> Result<(), LowerError> {
@@ -107,7 +223,12 @@ fn lower_member(ctx: &mut LowerCtx, member: &ModuleMember) -> Result<(), LowerEr
         ModuleMember::Class(class) => lower_class(ctx, class),
         ModuleMember::Select(select) => lower_select(ctx, select),
         ModuleMember::Import(_) => Ok(()),
-        ModuleMember::Module(_) => Ok(()), // TODO: nested modules
+        ModuleMember::Module(m) => {
+            for member in &m.members {
+                lower_member(ctx, member)?;
+            }
+            Ok(())
+        }
         ModuleMember::Newtype(_) => Ok(()), // TODO: newtype lowering
         ModuleMember::ModuleAlias(_) | ModuleMember::TypeAlias(_) | ModuleMember::PredicateAlias(_) => Ok(()),
         ModuleMember::Signature(_) => Ok(()),
@@ -152,10 +273,18 @@ fn lower_predicate(
 
         // For member predicates, add characteristic predicate constraint on `this`
         if let Some(cls) = class_name {
+            ctx.var_types.insert("this".to_string(), cls.to_string());
             atoms.push(MirAtom::Scan(MirScan::new(
                 &format!("{}#char", cls),
                 vec![MirTerm::var("this")],
             )));
+        }
+
+        // Register class-typed parameters for member call resolution
+        for p in &pred.head.params {
+            if let TypeExprKind::ClassName(name) = &p.ty.kind {
+                ctx.register_class_var(&p.name.name, &name.name, &mut atoms);
+            }
         }
 
         lower_formula(ctx, body_formula, &mut atoms, &pred_name)?;
@@ -173,24 +302,46 @@ fn lower_predicate(
 // Class lowering
 // ============================================================
 
+/// Build supertype constraint atoms from a class's supertypes list.
+fn supertype_atoms(supertypes: &[TypeExpr]) -> Vec<MirAtom> {
+    let mut atoms = Vec::new();
+    for sup in supertypes {
+        match &sup.kind {
+            TypeExprKind::ClassName(name) => {
+                atoms.push(MirAtom::Scan(MirScan::new(
+                    &format!("{}#char", name.name),
+                    vec![MirTerm::var("this")],
+                )));
+            }
+            TypeExprKind::Database(db_type) => {
+                // @typename → scan @typename#char (seeded by engine from schema)
+                atoms.push(MirAtom::Scan(MirScan::new(
+                    &format!("{}#char", db_type),
+                    vec![MirTerm::var("this")],
+                )));
+            }
+            TypeExprKind::ModuleAccess(_, member) => {
+                // Module::Type → use the member type's char predicate
+                atoms.push(MirAtom::Scan(MirScan::new(
+                    &format!("{}#char", member.name),
+                    vec![MirTerm::var("this")],
+                )));
+            }
+            _ => {} // Primitives handled elsewhere
+        }
+    }
+    atoms
+}
+
 fn lower_class(ctx: &mut LowerCtx, class: &ClassDecl) -> Result<(), LowerError> {
     let class_name = &class.name.name;
 
+    let mut has_char_pred = false;
     for member in &class.members {
         match member {
             ClassMember::CharacteristicPredicate { body, .. } => {
-                let mut atoms = Vec::new();
-
-                // Add supertype constraint
-                for sup in &class.supertypes {
-                    if let TypeExprKind::ClassName(name) = &sup.kind {
-                        atoms.push(MirAtom::Scan(MirScan::new(
-                            &format!("{}#char", name.name),
-                            vec![MirTerm::var("this")],
-                        )));
-                    }
-                    // Primitives don't have char predicates
-                }
+                has_char_pred = true;
+                let mut atoms = supertype_atoms(&class.supertypes);
 
                 lower_formula(ctx, body, &mut atoms, &format!("{}#char", class_name))?;
 
@@ -209,6 +360,19 @@ fn lower_class(ctx: &mut LowerCtx, class: &ClassDecl) -> Result<(), LowerError> 
         }
     }
 
+    // If no explicit characteristic predicate, generate an implicit one
+    // from supertypes: ClassName#char(this) :- Super1#char(this), Super2#char(this).
+    if !has_char_pred {
+        let atoms = supertype_atoms(&class.supertypes);
+        if !atoms.is_empty() {
+            ctx.emit_predicate(MirPredicate::new(
+                &format!("{}#char", class_name),
+                vec![MirParam::new("this", MirType::Any)],
+                atoms,
+            ));
+        }
+    }
+
     Ok(())
 }
 
@@ -221,9 +385,15 @@ fn lower_select(ctx: &mut LowerCtx, select: &Select) -> Result<(), LowerError> {
 
     // Build params from `from` clause variables
     let mut params: Vec<MirParam> = Vec::new();
+    let mut atoms = Vec::new();
     for var in &select.from {
         let ty = lower_type_expr_kind(&var.ty.kind);
         params.push(MirParam::new(&var.name.name, ty));
+
+        // For class-typed variables, add characteristic predicate constraint
+        if let TypeExprKind::ClassName(name) = &var.ty.kind {
+            ctx.register_class_var(&var.name.name, &name.name, &mut atoms);
+        }
     }
 
     // Add params for each select expression (as _sel0, _sel1, ...)
@@ -233,8 +403,6 @@ fn lower_select(ctx: &mut LowerCtx, select: &Select) -> Result<(), LowerError> {
         params.push(MirParam::new(&var_name, MirType::Any));
         select_vars.push(var_name);
     }
-
-    let mut atoms = Vec::new();
 
     // Lower `where` clause
     if let Some(ref where_clause) = select.where_clause {
@@ -360,17 +528,22 @@ fn lower_formula(
             body.push(MirAtom::Scan(MirScan::new(&name.name, terms)));
         }
 
-        FormulaKind::MemberCall { receiver, name, closure: _, args } => {
+        FormulaKind::MemberCall { receiver, name, closure, args } => {
             let (recv_term, extra) = lower_expr(ctx, receiver, parent_pred)?;
             body.extend(extra);
+            let resolved = ctx.resolve_member_call(&recv_term, &name.name);
             let mut terms = vec![recv_term];
             for arg in args {
                 let (term, extra) = lower_expr(ctx, arg, parent_pred)?;
                 body.extend(extra);
                 terms.push(term);
             }
-            // For member calls, we use the name directly (type resolution happens at HIR)
-            body.push(MirAtom::Scan(MirScan::new(&name.name, terms)));
+            if let Some(closure_op) = closure {
+                let tc_name = ctx.generate_tc_predicate(&resolved, *closure_op);
+                body.push(MirAtom::Scan(MirScan::new(&tc_name, terms)));
+            } else {
+                body.push(MirAtom::Scan(MirScan::new(&resolved, terms)));
+            }
         }
 
         FormulaKind::QualifiedCall { qualifier, name, args } => {
@@ -409,7 +582,7 @@ fn lower_formula(
                     // Double bridge: unwrap
                     lower_formula(ctx, inner_formula, body, parent_pred)?;
                 }
-                ExprKind::Call { name, closure: _, args } => {
+                ExprKind::Call { name, closure, args } => {
                     // Bare call in formula context: no result variable
                     let mut terms = Vec::new();
                     for arg in args {
@@ -417,19 +590,30 @@ fn lower_formula(
                         body.extend(extra);
                         terms.push(term);
                     }
-                    body.push(MirAtom::Scan(MirScan::new(&name.name, terms)));
+                    if let Some(closure_op) = closure {
+                        let tc_name = ctx.generate_tc_predicate(&name.name, *closure_op);
+                        body.push(MirAtom::Scan(MirScan::new(&tc_name, terms)));
+                    } else {
+                        body.push(MirAtom::Scan(MirScan::new(&name.name, terms)));
+                    }
                 }
-                ExprKind::MemberCall { receiver, name, closure: _, args } => {
+                ExprKind::MemberCall { receiver, name, closure, args } => {
                     // Member call in formula context: no result variable
                     let (recv_term, extra) = lower_expr(ctx, receiver, parent_pred)?;
                     body.extend(extra);
+                    let resolved = ctx.resolve_member_call(&recv_term, &name.name);
                     let mut terms = vec![recv_term];
                     for arg in args {
                         let (term, extra) = lower_expr(ctx, arg, parent_pred)?;
                         body.extend(extra);
                         terms.push(term);
                     }
-                    body.push(MirAtom::Scan(MirScan::new(&name.name, terms)));
+                    if let Some(closure_op) = closure {
+                        let tc_name = ctx.generate_tc_predicate(&resolved, *closure_op);
+                        body.push(MirAtom::Scan(MirScan::new(&tc_name, terms)));
+                    } else {
+                        body.push(MirAtom::Scan(MirScan::new(&resolved, terms)));
+                    }
                 }
                 ExprKind::QualifiedCall { qualifier, name, args } => {
                     // Qualified call in formula context: no result variable
@@ -600,6 +784,14 @@ fn lower_exists(
     let terms: Vec<MirTerm> = outer_vars.iter().map(|v| MirTerm::var(v)).collect();
 
     let mut inner_atoms = Vec::new();
+
+    // Register class-typed quantified variables
+    for v in vars {
+        if let TypeExprKind::ClassName(name) = &v.ty.kind {
+            ctx.register_class_var(&v.name.name, &name.name, &mut inner_atoms);
+        }
+    }
+
     if let Some(g) = guard {
         lower_formula(ctx, g, &mut inner_atoms, &aux_name)?;
     }
@@ -773,7 +965,7 @@ fn lower_eq_assignment(
             }));
             Ok(())
         }
-        ExprKind::Call { name, closure: None, args } => {
+        ExprKind::Call { name, closure, args } => {
             // result = f(args) → f(args, result)
             let mut terms = Vec::new();
             for arg in args {
@@ -782,12 +974,18 @@ fn lower_eq_assignment(
                 terms.push(term);
             }
             terms.push(MirTerm::var(var_name));
-            body.push(MirAtom::Scan(MirScan::new(&name.name, terms)));
+            if let Some(closure_op) = closure {
+                let tc_name = ctx.generate_tc_predicate(&name.name, *closure_op);
+                body.push(MirAtom::Scan(MirScan::new(&tc_name, terms)));
+            } else {
+                body.push(MirAtom::Scan(MirScan::new(&name.name, terms)));
+            }
             Ok(())
         }
-        ExprKind::MemberCall { receiver, name, closure: None, args } => {
+        ExprKind::MemberCall { receiver, name, closure, args } => {
             let (recv_term, extra) = lower_expr(ctx, receiver, parent_pred)?;
             body.extend(extra);
+            let resolved = ctx.resolve_member_call(&recv_term, &name.name);
             let mut terms = vec![recv_term];
             for arg in args {
                 let (term, extra) = lower_expr(ctx, arg, parent_pred)?;
@@ -795,7 +993,12 @@ fn lower_eq_assignment(
                 terms.push(term);
             }
             terms.push(MirTerm::var(var_name));
-            body.push(MirAtom::Scan(MirScan::new(&name.name, terms)));
+            if let Some(closure_op) = closure {
+                let tc_name = ctx.generate_tc_predicate(&resolved, *closure_op);
+                body.push(MirAtom::Scan(MirScan::new(&tc_name, terms)));
+            } else {
+                body.push(MirAtom::Scan(MirScan::new(&resolved, terms)));
+            }
             Ok(())
         }
         _ => {
@@ -880,7 +1083,7 @@ fn lower_expr(
             }
         }
 
-        ExprKind::Call { name, closure: _, args } => {
+        ExprKind::Call { name, closure, args } => {
             let mut terms = Vec::new();
             let mut extra = Vec::new();
             for arg in args {
@@ -888,25 +1091,43 @@ fn lower_expr(
                 extra.extend(e);
                 terms.push(term);
             }
-            // Add result variable (predicate call returns a value)
-            let result_var = ctx.fresh_var();
-            terms.push(MirTerm::var(&result_var));
-            extra.push(MirAtom::Scan(MirScan::new(&name.name, terms)));
-            Ok((MirTerm::var(&result_var), extra))
+            if let Some(closure_op) = closure {
+                // Transitive closure: generate TC predicate, call it instead
+                let tc_name = ctx.generate_tc_predicate(&name.name, *closure_op);
+                let result_var = ctx.fresh_var();
+                terms.push(MirTerm::var(&result_var));
+                extra.push(MirAtom::Scan(MirScan::new(&tc_name, terms)));
+                Ok((MirTerm::var(&result_var), extra))
+            } else {
+                // Add result variable (predicate call returns a value)
+                let result_var = ctx.fresh_var();
+                terms.push(MirTerm::var(&result_var));
+                extra.push(MirAtom::Scan(MirScan::new(&name.name, terms)));
+                Ok((MirTerm::var(&result_var), extra))
+            }
         }
 
-        ExprKind::MemberCall { receiver, name, closure: _, args } => {
+        ExprKind::MemberCall { receiver, name, closure, args } => {
             let (recv_term, mut extra) = lower_expr(ctx, receiver, parent_pred)?;
+            let resolved = ctx.resolve_member_call(&recv_term, &name.name);
             let mut terms = vec![recv_term];
             for arg in args {
                 let (term, e) = lower_expr(ctx, arg, parent_pred)?;
                 extra.extend(e);
                 terms.push(term);
             }
-            let result_var = ctx.fresh_var();
-            terms.push(MirTerm::var(&result_var));
-            extra.push(MirAtom::Scan(MirScan::new(&name.name, terms)));
-            Ok((MirTerm::var(&result_var), extra))
+            if let Some(closure_op) = closure {
+                let tc_name = ctx.generate_tc_predicate(&resolved, *closure_op);
+                let result_var = ctx.fresh_var();
+                terms.push(MirTerm::var(&result_var));
+                extra.push(MirAtom::Scan(MirScan::new(&tc_name, terms)));
+                Ok((MirTerm::var(&result_var), extra))
+            } else {
+                let result_var = ctx.fresh_var();
+                terms.push(MirTerm::var(&result_var));
+                extra.push(MirAtom::Scan(MirScan::new(&resolved, terms)));
+                Ok((MirTerm::var(&result_var), extra))
+            }
         }
 
         ExprKind::QualifiedCall { qualifier, name, args } => {
@@ -977,13 +1198,43 @@ fn lower_expr(
         }
 
         ExprKind::SetLiteral { elements } => {
-            // {a, b, c} — create a fresh var, disjunction of equalities
-            // For now, use first element (simplified)
+            // [a, b, c] — create auxiliary predicate with disjunction of equalities
             if elements.is_empty() {
                 Ok((MirTerm::Wildcard, vec![]))
+            } else if elements.len() == 1 {
+                // Single element — no need for auxiliary predicate
+                let (term, extra) = lower_expr(ctx, &elements[0], parent_pred)?;
+                Ok((term, extra))
             } else {
-                let (first, extra) = lower_expr(ctx, &elements[0], parent_pred)?;
-                Ok((first, extra))
+                let aux_name = ctx.fresh_pred("_set");
+                let result_var = ctx.fresh_var();
+                let param_name = "_x".to_string();
+
+                // Build one clause per element: _set_N(_x) :- _x = element_i
+                let mut clauses = Vec::new();
+                for elem in elements {
+                    let (term, mut clause_atoms) = lower_expr(ctx, elem, &aux_name)?;
+                    clause_atoms.push(MirAtom::Guard(MirGuard {
+                        left: MirTerm::var(&param_name),
+                        op: MirCompOp::Eq,
+                        right: term,
+                    }));
+                    clauses.push(clause_atoms);
+                }
+
+                ctx.emit_predicate(MirPredicate {
+                    name: aux_name.clone(),
+                    params: vec![MirParam::new(&param_name, MirType::Any)],
+                    body: MirBody::Disjunction(clauses),
+                    annotations: MirAnnotations::default(),
+                    is_abstract: false,
+                });
+
+                let extra = vec![MirAtom::Scan(MirScan::new(
+                    &aux_name,
+                    vec![MirTerm::var(&result_var)],
+                ))];
+                Ok((MirTerm::var(&result_var), extra))
             }
         }
 
@@ -1410,6 +1661,156 @@ fn lower_binop(op: BinOp) -> MirArithOp {
         BinOp::Div => MirArithOp::Div,
         BinOp::Mod => MirArithOp::Mod,
     }
+}
+
+// ============================================================
+// Dispatch predicate generation (post-processing)
+// ============================================================
+
+/// Generate dispatch predicates for inherited methods.
+///
+/// For each class, identifies methods referenced via `ClassName#methodName` that
+/// don't have a direct definition. For these, generates a dispatch predicate that
+/// delegates to the parent class's version (found by scanning existing predicates).
+///
+/// Also generates unqualified dispatch predicates that union all variants of
+/// each method name across classes.
+pub fn generate_dispatch_predicates(program: &mut MirProgram) {
+    // Collect all ClassName#methodName predicates and characteristic predicates
+    let mut class_methods: HashMap<String, HashMap<String, Vec<MirParam>>> = HashMap::new();
+    let mut class_supertypes: HashMap<String, Vec<String>> = HashMap::new();
+    let mut all_method_groups: HashMap<String, Vec<(String, Vec<MirParam>)>> = HashMap::new();
+
+    for pred in &program.predicates {
+        if let Some(hash_pos) = pred.name.find('#') {
+            let class_name = &pred.name[..hash_pos];
+            let method_name = &pred.name[hash_pos + 1..];
+
+            if method_name == "char" {
+                // Analyze characteristic predicate body to find supertypes
+                // Supertypes are referenced via Scan atoms matching "X#char"
+                let atoms = match &pred.body {
+                    MirBody::Conjunction(atoms) => atoms.clone(),
+                    MirBody::Disjunction(clauses) => clauses.iter().flatten().cloned().collect(),
+                    MirBody::None => vec![],
+                };
+                for atom in &atoms {
+                    if let MirAtom::Scan(scan) = atom {
+                        if scan.predicate.ends_with("#char") && scan.predicate != pred.name {
+                            let parent = &scan.predicate[..scan.predicate.len() - 5];
+                            class_supertypes
+                                .entry(class_name.to_string())
+                                .or_default()
+                                .push(parent.to_string());
+                        }
+                    }
+                }
+                continue;
+            }
+
+            class_methods
+                .entry(class_name.to_string())
+                .or_default()
+                .insert(method_name.to_string(), pred.params.clone());
+
+            all_method_groups
+                .entry(method_name.to_string())
+                .or_default()
+                .push((pred.name.clone(), pred.params.clone()));
+        }
+    }
+
+    // Collect all referenced ClassName#methodName from scan atoms in all predicates
+    let mut referenced_methods: HashSet<String> = HashSet::new();
+    for pred in &program.predicates {
+        let atoms = match &pred.body {
+            MirBody::Conjunction(atoms) => atoms.clone(),
+            MirBody::Disjunction(clauses) => clauses.iter().flatten().cloned().collect(),
+            MirBody::None => vec![],
+        };
+        for atom in &atoms {
+            match atom {
+                MirAtom::Scan(scan) | MirAtom::NegScan(scan) => {
+                    if scan.predicate.contains('#') {
+                        referenced_methods.insert(scan.predicate.clone());
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+
+    let existing_names: HashSet<String> = program.predicates.iter().map(|p| p.name.clone()).collect();
+    let mut dispatch_preds = Vec::new();
+
+    // For each referenced ClassName#methodName that doesn't exist, try to inherit
+    for ref_name in &referenced_methods {
+        if existing_names.contains(ref_name) {
+            continue;
+        }
+        if let Some(hash_pos) = ref_name.find('#') {
+            let class_name = &ref_name[..hash_pos];
+            let method_name = &ref_name[hash_pos + 1..];
+
+            if method_name == "char" {
+                continue;
+            }
+
+            // Walk the supertype chain to find a class that defines this method
+            let mut found = None;
+            let mut visited = HashSet::new();
+            let mut queue = vec![class_name.to_string()];
+            while let Some(current) = queue.pop() {
+                if visited.contains(&current) {
+                    continue;
+                }
+                visited.insert(current.clone());
+                if let Some(methods) = class_methods.get(&current) {
+                    if let Some(params) = methods.get(method_name) {
+                        found = Some((format!("{}#{}", current, method_name), params.clone()));
+                        break;
+                    }
+                }
+                if let Some(supers) = class_supertypes.get(&current) {
+                    queue.extend(supers.iter().cloned());
+                }
+            }
+
+            if let Some((parent_pred_name, params)) = found {
+                // Generate ClassName#methodName(params) :- ParentClass#methodName(params).
+                let terms: Vec<MirTerm> = params.iter().map(|p| MirTerm::var(&p.name)).collect();
+                dispatch_preds.push(MirPredicate::new(
+                    ref_name,
+                    params,
+                    vec![MirAtom::Scan(MirScan::new(&parent_pred_name, terms))],
+                ));
+            }
+        }
+    }
+
+    // Also generate unqualified dispatch predicates that union all class variants
+    for (method_name, variants) in &all_method_groups {
+        if existing_names.contains(method_name) {
+            continue;
+        }
+
+        let params = variants[0].1.clone();
+        let mut clauses = Vec::new();
+        for (qualified_name, _) in variants {
+            let terms: Vec<MirTerm> = params.iter().map(|p| MirTerm::var(&p.name)).collect();
+            clauses.push(vec![MirAtom::Scan(MirScan::new(qualified_name, terms))]);
+        }
+
+        dispatch_preds.push(MirPredicate {
+            name: method_name.clone(),
+            params,
+            body: MirBody::Disjunction(clauses),
+            annotations: MirAnnotations::default(),
+            is_abstract: false,
+        });
+    }
+
+    program.predicates.extend(dispatch_preds);
 }
 
 fn lower_agg_kind(kind: ocql_ql_ast::AggKind) -> MirAggFunction {

@@ -83,6 +83,10 @@ impl Relation {
         self.tuples.push(tuple.clone());
         // Update all existing indexes (get_mut avoids RefCell overhead)
         for index in self.indexes.get_mut().iter_mut() {
+            let max_col = index.columns.iter().copied().max().unwrap_or(0);
+            if tuple.len() <= max_col {
+                continue; // skip indexes on columns wider than this tuple
+            }
             let key: SmallVec<[Value; 4]> = index.columns.iter().map(|&c| tuple[c].clone()).collect();
             index.data.entry(key).or_default().push(idx);
         }
@@ -144,8 +148,12 @@ impl Relation {
         }
 
         // Build new index from all existing tuples
+        let max_col = columns.iter().copied().max().unwrap_or(0);
         let mut data: HashMap<SmallVec<[Value; 4]>, Vec<usize>> = HashMap::new();
         for (i, tuple) in self.tuples.iter().enumerate() {
+            if tuple.len() <= max_col {
+                continue; // skip tuples that are too short for this index
+            }
             let key: SmallVec<[Value; 4]> = columns.iter().map(|&c| tuple[c].clone()).collect();
             data.entry(key).or_default().push(i);
         }

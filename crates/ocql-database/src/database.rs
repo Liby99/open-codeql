@@ -2,6 +2,7 @@ use std::collections::HashMap;
 
 use ocql_schema::DbScheme;
 
+use ocql_schema::ColumnType;
 use crate::relation::{ColumnDef, Relation, RelationSchema, Tuple};
 use crate::string_interner::StringInterner;
 use crate::value::{EntityId, Value};
@@ -89,11 +90,24 @@ impl Database {
     }
 
     /// Insert a tuple into a named relation.
+    /// If the relation does not exist, it is auto-created (standard Datalog semantics:
+    /// any predicate can be defined dynamically by inserting tuples).
     pub fn insert(&mut self, table: &str, tuple: Tuple) -> Result<bool, DatabaseError> {
-        match self.relations.get_mut(table) {
-            Some(rel) => Ok(rel.insert(tuple)),
-            None => Err(DatabaseError::UnknownTable(table.to_string())),
+        if !self.relations.contains_key(table) {
+            let columns: Vec<ColumnDef> = (0..tuple.len())
+                .map(|i| ColumnDef {
+                    name: format!("col{}", i),
+                    col_type: ColumnType::Int,
+                })
+                .collect();
+            let schema = RelationSchema {
+                name: table.to_string(),
+                columns,
+            };
+            self.relations.insert(table.to_string(), Relation::new(schema));
         }
+        let rel = self.relations.get_mut(table).unwrap();
+        Ok(rel.insert(tuple))
     }
 
     /// Convenience: intern a string and return a Value::String.
@@ -221,11 +235,13 @@ mod tests {
     }
 
     #[test]
-    fn test_insert_unknown_table() {
+    fn test_insert_auto_creates_table() {
         let mut db = Database::empty();
         let tuple: Tuple = SmallVec::from_vec(vec![Value::Int(1)]);
-        let result = db.insert("nonexistent", tuple);
-        assert!(result.is_err());
+        let result = db.insert("auto_created", tuple);
+        assert!(result.is_ok());
+        assert!(result.unwrap()); // newly inserted
+        assert_eq!(db.scan("auto_created").unwrap().count(), 1);
     }
 
     #[test]

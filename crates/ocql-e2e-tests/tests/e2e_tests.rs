@@ -68,6 +68,16 @@ fn collect_ints(db: &Database, table: &str) -> HashSet<i64> {
         .collect()
 }
 
+/// Collect a specific column as strings from a result table.
+fn collect_strings_col(db: &Database, table: &str, col: usize) -> HashSet<String> {
+    db.scan(table).unwrap()
+        .map(|t| match &t[col] {
+            Value::String(s) => db.strings.resolve(*s).to_string(),
+            other => format!("{:?}", other),
+        })
+        .collect()
+}
+
 /// Count rows in a result table.
 fn count_rows(db: &Database, table: &str) -> usize {
     db.scan(table).map(|iter| iter.count()).unwrap_or(0)
@@ -447,6 +457,146 @@ fn c_count_security_functions() {
 }
 
 // ============================================================
+// QL class system: class definitions + member calls
+// ============================================================
+
+/// Define a Function class over the `functions` table and use member methods.
+/// This tests: class characteristic predicate, member predicates, `from Class var`,
+/// and `var.method()` member call resolution.
+#[test]
+fn ql_class_function_with_methods() {
+    let mut db = extract_c("basic.c");
+    eval_ql(r#"
+        class Function extends int {
+            Function() { functions(this, _, _) }
+            string getName() { functions(this, result, _) }
+            int getKind() { functions(this, _, result) }
+        }
+        from Function f
+        select f.getName()
+    "#, &mut db);
+
+    // Select produces [f, _sel0] where _sel0 = f.getName(). Column 1 has the names.
+    let result = collect_strings_col(&db, "select_result_0", 1);
+    assert!(result.contains("main"), "got: {:?}", result);
+    assert!(result.contains("helper"), "got: {:?}", result);
+    assert!(result.contains("unused"), "got: {:?}", result);
+    assert_eq!(result.len(), 3);
+}
+
+/// Test member predicate used as formula (no result variable).
+#[test]
+fn ql_class_member_predicate_as_formula() {
+    let mut db = extract_c("basic.c");
+    eval_ql(r#"
+        class Function extends int {
+            Function() { functions(this, _, _) }
+            string getName() { functions(this, result, _) }
+            predicate hasParams() { params(this, _, _, _) }
+        }
+        predicate funcs_with_params(string name) {
+            exists(Function f | f.hasParams() | name = f.getName())
+        }
+    "#, &mut db);
+
+    let result = collect_strings(&db, "funcs_with_params");
+    assert!(result.contains("helper"), "helper has params, got: {:?}", result);
+    assert!(!result.contains("main"), "main has no params, got: {:?}", result);
+}
+
+/// Test `from Class var where ... select var.method()` end-to-end.
+#[test]
+fn ql_class_with_where_clause() {
+    let mut db = extract_c("basic.c");
+    eval_ql(r#"
+        class Function extends int {
+            Function() { functions(this, _, _) }
+            string getName() { functions(this, result, _) }
+        }
+        from Function f
+        where f.getName() = "main"
+        select f.getName()
+    "#, &mut db);
+
+    let result = collect_strings_col(&db, "select_result_0", 1);
+    assert_eq!(result.len(), 1);
+    assert!(result.contains("main"));
+}
+
+/// Test class negation: functions without parameters using explicit predicate.
+/// Uses predicate-based approach since class inheritance dispatch is a future feature.
+#[test]
+fn ql_class_negation_no_params() {
+    let mut db = extract_c("basic.c");
+    eval_ql(r#"
+        class Function extends int {
+            Function() { functions(this, _, _) }
+            string getName() { functions(this, result, _) }
+            predicate hasParams() { params(this, _, _, _) }
+        }
+        predicate paramless_func_names(string name) {
+            exists(Function f |
+                not f.hasParams() |
+                name = f.getName()
+            )
+        }
+    "#, &mut db);
+
+    let result = collect_strings(&db, "paramless_func_names");
+    assert!(result.contains("main"), "got: {:?}", result);
+    assert!(result.contains("unused"), "got: {:?}", result);
+    assert!(!result.contains("helper"), "helper has params, got: {:?}", result);
+}
+
+/// Test Java: class wrapping methods table.
+#[test]
+fn ql_java_method_class() {
+    let mut db = extract_java("Simple.java");
+    eval_ql(r#"
+        class Method extends int {
+            Method() { methods(this, _, _, _, _, _) }
+            string getName() { methods(this, result, _, _, _, _) }
+            string getReturnType() { methods(this, _, _, result, _, _) }
+        }
+        from Method m
+        select m.getName()
+    "#, &mut db);
+
+    let result = collect_strings_col(&db, "select_result_0", 1);
+    assert!(result.contains("getValue"), "got: {:?}", result);
+    assert!(result.contains("add"), "got: {:?}", result);
+    assert!(result.contains("helper"), "got: {:?}", result);
+    assert!(result.contains("main"), "got: {:?}", result);
+}
+
+/// Multi-file merge test: define library predicates and use them.
+/// This simulates what happens when you import library classes.
+#[test]
+fn ql_multi_file_merge() {
+    let mut db = extract_c("basic.c");
+    // Simulate a library defining Function + query using it, all in one string
+    // (this is what multi-file compilation would produce)
+    eval_ql(r#"
+        class Function extends int {
+            Function() { functions(this, _, _) }
+            string getName() { functions(this, result, _) }
+            predicate hasParams() { params(this, _, _, _) }
+        }
+        class Param extends int {
+            Param() { params(_, _, _, _) and this = this }
+            string getName() { params(_, _, result, _) and this = this }
+        }
+        predicate func_param_count(string fname) {
+            exists(Function f | f.hasParams() | fname = f.getName())
+        }
+    "#, &mut db);
+
+    let result = collect_strings(&db, "func_param_count");
+    assert!(result.contains("helper"));
+    assert_eq!(result.len(), 1);
+}
+
+// ============================================================
 // Pipeline: QL compilation error handling
 // ============================================================
 
@@ -472,4 +622,57 @@ fn ql_eval_nonexistent_table() {
 
     let n = count_rows(&db, "glob_names");
     assert_eq!(n, 0, "basic.c has no global variables");
+}
+
+// ============================================================
+// Gap fix tests: dispatch, transitive closure, set literals
+// ============================================================
+
+#[test]
+fn ql_dispatch_inherited_method() {
+    let mut db = extract_c("basic.c");
+    eval_ql(r#"
+        class Function extends int {
+            Function() { functions(this, _, _) }
+            string getName() { functions(this, result, _) }
+        }
+        class SpecialFunction extends Function {
+            SpecialFunction() { functions(this, "main", _) }
+        }
+        from SpecialFunction f
+        select f.getName()
+    "#, &mut db);
+    let result = collect_strings_col(&db, "select_result_0", 1);
+    assert!(result.contains("main"), "got: {:?}", result);
+}
+
+#[test]
+fn ql_transitive_closure() {
+    let mut db = extract_c("basic.c");
+    eval_ql(r#"
+        predicate edge(int a, int b) {
+            a = 1 and b = 2 or
+            a = 2 and b = 3 or
+            a = 3 and b = 4
+        }
+        predicate reachable(int a, int b) {
+            edge+(a, b)
+        }
+    "#, &mut db);
+    // 1->2, 1->3, 1->4, 2->3, 2->4, 3->4 = 6 pairs
+    let n = count_rows(&db, "reachable");
+    assert!(n >= 6, "expected at least 6 reachable pairs, got {}", n);
+}
+
+#[test]
+fn ql_set_literal_multiple() {
+    let mut db = extract_c("basic.c");
+    eval_ql(r#"
+        predicate target_funcs(string name) {
+            functions(_, name, _) and name = ["main", "helper"]
+        }
+    "#, &mut db);
+    let result = collect_strings(&db, "target_funcs");
+    assert!(result.contains("main"), "got: {:?}", result);
+    assert!(result.contains("helper"), "got: {:?}", result);
 }

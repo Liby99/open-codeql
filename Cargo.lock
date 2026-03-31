@@ -364,8 +364,10 @@ dependencies = [
  "ocql-extractor-common",
  "ocql-extractor-cpp",
  "ocql-extractor-java",
+ "ocql-hir",
  "ocql-lir",
  "ocql-mir",
+ "ocql-ql-ast",
  "ocql-ql-parser",
  "ocql-schema",
 ]

@@ -23,6 +23,24 @@ folders(
 
 @container = @file | @folder
 
+containerparent(
+    int parent: @container ref,
+    unique int child: @container ref
+);
+
+numlines(
+    int element_id: @sourceline ref,
+    int num_lines: int ref,
+    int num_code: int ref,
+    int num_comment: int ref
+);
+
+@sourceline = @file | @function | @usertype
+
+sourceLocationPrefix(
+    string prefix: string ref
+);
+
 locations_default(
     unique int id: @location_default,
     int file: @file ref,
@@ -48,6 +66,31 @@ function_return_type(
 function_entry_point(
     int id: @function ref,
     unique int entry_point: @stmt ref
+);
+
+fun_decls(
+    unique int id: @fun_decl,
+    int function: @function ref,
+    string name: string ref,
+    int kind: int ref,
+    int location: @location_default ref
+);
+
+fun_def(
+    unique int id: @fun_decl ref
+);
+
+mangled_name(
+    unique int id: @function ref,
+    int mangled_name: @mangledname ref,
+    int is_complete: int ref
+);
+
+@mangledname = @mangledname_entity
+
+manglednames(
+    unique int id: @mangledname_entity,
+    string mangled_name: string ref
 );
 
 /* ========== Parameters ========== */
@@ -233,7 +276,8 @@ element_location(
 
 @element = @function | @variable | @globalvariable | @localvariable
          | @membervariable | @usertype | @enumconstant | @namespace
-         | @stmt | @expr | @comment | @include
+         | @stmt | @expr | @comment | @include | @fun_decl
+         | @mangledname_entity
 
 /* ========== Enclosing function ========== */
 

@@ -23,7 +23,7 @@ pub mod lower;
 pub mod emit;
 
 pub use nodes::*;
-pub use lower::{LowerCtx, LowerError, lower_source_file};
+pub use lower::{LowerCtx, LowerError, lower_source_file, lower_source_files, generate_dispatch_predicates};
 pub use emit::{emit_program, emit_program_with_strings};
 pub use sexpr::{print_program as print_mir, parse_program as parse_mir};
 

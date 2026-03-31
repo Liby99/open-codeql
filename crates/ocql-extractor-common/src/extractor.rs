@@ -1,6 +1,6 @@
 use std::path::Path;
 
-use ocql_database::Database;
+use ocql_database::{Database, Value};
 
 use crate::FactEmitter;
 use crate::source_roots::{BuildSystem, SourceRoot, discover_source_roots};
@@ -62,6 +62,36 @@ pub trait Extractor {
         let mut emitter = FactEmitter::new(db);
         let file_id = emitter.alloc();
         emitter.emit_file(file_id, path);
+
+        // Emit folder hierarchy and containerparent relationships
+        if let Some(parent_path) = std::path::Path::new(path).parent() {
+            let parent_str = parent_path.to_string_lossy().to_string();
+            if !parent_str.is_empty() {
+                let folder_id = emitter.alloc();
+                emitter.emit_folder(folder_id, &parent_str);
+                // containerparent(folder, file)
+                emitter.emit("containerparent", vec![
+                    Value::Entity(folder_id),
+                    Value::Entity(file_id),
+                ]);
+            }
+        }
+
+        // Emit numlines for the file (count from source)
+        let source_str = String::from_utf8_lossy(source);
+        let total_lines = source_str.lines().count() as i64;
+        let code_lines = source_str.lines()
+            .filter(|l| !l.trim().is_empty() && !l.trim().starts_with("//") && !l.trim().starts_with("/*"))
+            .count() as i64;
+        let comment_lines = source_str.lines()
+            .filter(|l| l.trim().starts_with("//") || l.trim().starts_with("/*") || l.trim().starts_with("*"))
+            .count() as i64;
+        emitter.emit("numlines", vec![
+            Value::Entity(file_id),
+            Value::Int(total_lines),
+            Value::Int(code_lines),
+            Value::Int(comment_lines),
+        ]);
 
         self.extract_file(&mut emitter, file_id, &tree, source);
 

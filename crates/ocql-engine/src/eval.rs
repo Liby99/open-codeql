@@ -41,6 +41,11 @@ type Bindings = HashMap<String, Value>;
 /// Creates output relations for all IDB predicates and evaluates rules
 /// to a fixed point. Returns the names of all IDB relations created.
 pub fn evaluate(program: &Program, db: &mut Database) -> Result<Vec<String>, EvalError> {
+    // Seed @type#char relations from the schema.
+    // For each table with `unique int id: @typename`, populate `@typename#char`
+    // with all entity IDs. Also handle union types transitively.
+    seed_db_type_chars(db);
+
     let strata = stratify(program).map_err(EvalError::Stratification)?;
 
     // Ensure output relations exist for all IDB predicates
@@ -86,6 +91,87 @@ fn ensure_relation_for_head(db: &mut Database, rule: &Rule) {
         columns,
     };
     db.add_relation(name, schema);
+}
+
+/// Seed `@typename#char` relations from the database schema.
+///
+/// For each table with a `unique int id: @typename` column, collects all entity IDs
+/// and inserts them into a `@typename#char` relation. Also handles union types
+/// transitively (e.g., `@container = @file | @folder` means all `@file` and `@folder`
+/// entities are also `@container` entities).
+fn seed_db_type_chars(db: &mut Database) {
+    use std::collections::HashSet;
+
+    // Phase 1: For each table with `unique int id: @typename`, collect entity IDs
+    let mut type_entities: HashMap<String, Vec<Value>> = HashMap::new();
+
+    // Iterate schema tables to find defining tables
+    let schema = db.schema.clone();
+    for table in schema.tables() {
+        // Find first column that is unique and has an entity db_type
+        if let Some(col) = table.columns.first() {
+            if col.is_unique {
+                if let ocql_schema::DbType::Entity(ref entity_name) = col.db_type {
+                    // This table defines instances of @entity_name
+                    if let Some(rel) = db.relation(&table.name) {
+                        let ids: Vec<Value> = rel.scan()
+                            .map(|tuple| tuple[0].clone())
+                            .collect();
+                        type_entities.entry(entity_name.clone())
+                            .or_default()
+                            .extend(ids);
+                    }
+                }
+            }
+        }
+    }
+
+    // Phase 2: Propagate through union types
+    // @container = @file | @folder  →  @container entities include @file + @folder entities
+    let unions: Vec<_> = schema.unions().cloned().collect();
+    // Iterate until fixpoint (unions can be transitive)
+    let mut changed = true;
+    while changed {
+        changed = false;
+        for union_type in &unions {
+            let mut combined: Vec<Value> = type_entities.get(&union_type.name)
+                .cloned()
+                .unwrap_or_default();
+            let before_len = combined.len();
+            for variant in &union_type.variants {
+                if let Some(variant_entities) = type_entities.get(variant) {
+                    combined.extend(variant_entities.iter().cloned());
+                }
+            }
+            // Dedup
+            let deduped: HashSet<Value> = combined.into_iter().collect();
+            let new_entities: Vec<Value> = deduped.into_iter().collect();
+            if new_entities.len() != before_len {
+                changed = true;
+                type_entities.insert(union_type.name.clone(), new_entities);
+            }
+        }
+    }
+
+    // Phase 3: Insert into @typename#char relations
+    for (type_name, entities) in &type_entities {
+        let char_name = format!("{}#char", type_name);
+        // Create the relation if it doesn't exist
+        let rel_schema = RelationSchema {
+            name: char_name.clone(),
+            columns: vec![ColumnDef {
+                name: "this".to_string(),
+                col_type: ColumnType::Int,
+            }],
+        };
+        if db.relation(&char_name).is_none() {
+            db.add_relation(&char_name, rel_schema);
+        }
+        for entity in entities {
+            let tuple: Tuple = SmallVec::from_vec(vec![entity.clone()]);
+            let _ = db.insert(&char_name, tuple);
+        }
+    }
 }
 
 /// Evaluate non-recursive rules (single pass).
@@ -307,8 +393,12 @@ fn match_atom(
     db: &Database,
     bindings: &Bindings,
 ) -> Result<Vec<Bindings>, EvalError> {
-    let rel = db.relation(&atom.predicate)
-        .ok_or_else(|| EvalError::UnknownRelation(atom.predicate.clone()))?;
+    let rel = match db.relation(&atom.predicate) {
+        Some(r) => r,
+        // Undefined relation: return no matches (standard Datalog semantics —
+        // a reference to an undefined predicate produces zero tuples).
+        None => return Ok(Vec::new()),
+    };
 
     // Determine which columns have known values (bound vars or constants)
     let mut bound_cols: SmallVec<[usize; 4]> = SmallVec::new();

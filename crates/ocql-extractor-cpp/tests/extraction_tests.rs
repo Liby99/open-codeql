@@ -592,6 +592,52 @@ fn sqlite_like_params() {
 }
 
 // ============================================================
+// New tables: fun_decls, fun_def, mangled_name, manglednames,
+//             containerparent, numlines
+// ============================================================
+
+#[test]
+fn simple_cpp_fun_decls_and_manglednames() {
+    let db = extract("simple.cpp");
+    let func_count = table_count(&db, "functions");
+    let fun_decl_count = table_count(&db, "fun_decls");
+    let fun_def_count = table_count(&db, "fun_def");
+    let mangled_count = table_count(&db, "mangled_name");
+    let manglednames_count = table_count(&db, "manglednames");
+
+    eprintln!("[simple.cpp] functions={}, fun_decls={}, fun_def={}, mangled_name={}, manglednames={}",
+        func_count, fun_decl_count, fun_def_count, mangled_count, manglednames_count);
+
+    // Every function should have a fun_decl, fun_def, and mangled_name
+    assert_eq!(fun_decl_count, func_count, "Each function should have a fun_decl");
+    assert_eq!(fun_def_count, func_count, "Each function definition should have fun_def");
+    assert_eq!(mangled_count, func_count, "Each function should have a mangled_name entry");
+    assert_eq!(manglednames_count, func_count, "Each function should have a manglednames entry");
+}
+
+#[test]
+fn simple_cpp_containerparent_and_numlines() {
+    // Use a path with a directory component so containerparent gets emitted
+    let path = "tests/fixtures/simple.cpp";
+    let source = std::fs::read(path).unwrap();
+    let schema = cpp_schema();
+    let mut db = Database::from_schema(schema);
+    let extractor = CppExtractor::cpp();
+    let result = extractor.extract_source(&mut db, path, &source);
+    assert!(result.success);
+
+    let containerparent_count = table_count(&db, "containerparent");
+    let numlines_count = table_count(&db, "numlines");
+
+    eprintln!("[simple.cpp] containerparent={}, numlines={}", containerparent_count, numlines_count);
+
+    // Should have at least one containerparent (folder -> file)
+    assert!(containerparent_count >= 1, "Should have containerparent entries");
+    // Should have numlines for the file
+    assert!(numlines_count >= 1, "Should have numlines for the file");
+}
+
+// ============================================================
 // Cross-cutting: location and count sanity checks
 // ============================================================
 

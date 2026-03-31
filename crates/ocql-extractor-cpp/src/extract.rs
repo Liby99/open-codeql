@@ -261,7 +261,7 @@ fn extract_function(
     let name_val = emitter.string(&name);
     emitter.emit("functions", vec![
         Value::Entity(func_id),
-        name_val,
+        name_val.clone(),
         Value::Int(kind),
     ]);
 
@@ -269,6 +269,34 @@ fn extract_function(
     emitter.emit("element_location", vec![
         Value::Entity(func_id),
         Value::Entity(loc_id),
+    ]);
+
+    // Emit fun_decls (declaration entry for this function)
+    let fun_decl_id = emitter.alloc();
+    emitter.emit("fun_decls", vec![
+        Value::Entity(fun_decl_id),
+        Value::Entity(func_id),
+        name_val.clone(),
+        Value::Int(kind),
+        Value::Entity(loc_id),
+    ]);
+
+    // Mark as definition (fun_def)
+    emitter.emit("fun_def", vec![
+        Value::Entity(fun_decl_id),
+    ]);
+
+    // Emit mangled name (use the plain name as a stand-in since tree-sitter doesn't mangle)
+    let mangled_id = emitter.alloc();
+    let mangled_val = emitter.string(&name);
+    emitter.emit("manglednames", vec![
+        Value::Entity(mangled_id),
+        mangled_val,
+    ]);
+    emitter.emit("mangled_name", vec![
+        Value::Entity(func_id),
+        Value::Entity(mangled_id),
+        Value::Int(1), // is_complete = 1
     ]);
 
     // Return type — includes pointer/reference from the declarator

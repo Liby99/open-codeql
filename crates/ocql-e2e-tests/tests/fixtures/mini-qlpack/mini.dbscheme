@@ -1,0 +1,26 @@
+functions(
+    unique int id: @function,
+    string name: string ref,
+    int kind: int ref
+);
+
+#keyset[id, index]
+params(
+    int id: @function ref,
+    int index: int ref,
+    string name: string ref,
+    string param_type: string ref
+);
+
+localvariables(
+    unique int id: @localvariable,
+    string name: string ref,
+    string local_type: string ref
+);
+
+enclosingfunction(
+    unique int child: @element ref,
+    int parent: @function ref
+);
+
+@element = @function | @localvariable

@@ -11,6 +11,8 @@ ocql-schema = { path = "../ocql-schema" }
 ocql-database = { path = "../ocql-database" }
 ocql-engine = { path = "../ocql-engine" }
 ocql-ql-parser = { path = "../ocql-ql-parser" }
+ocql-ql-ast = { path = "../ocql-ql-ast" }
+ocql-hir = { path = "../ocql-hir" }
 ocql-mir = { path = "../ocql-mir" }
 ocql-lir = { path = "../ocql-lir" }
 ocql-extractor-common = { path = "../ocql-extractor-common" }
