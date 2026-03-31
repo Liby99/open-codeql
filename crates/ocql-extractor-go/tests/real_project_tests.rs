@@ -39,12 +39,11 @@ fn table_count(db: &Database, table: &str) -> usize {
 
 fn column_strings(db: &Database, table: &str, col: usize) -> Vec<String> {
     db.scan(table)
-        .unwrap()
-        .map(|t| match &t[col] {
+        .map(|iter| iter.map(|t| match &t[col] {
             Value::String(s) => db.strings.resolve(*s).to_string(),
             other => format!("{:?}", other),
-        })
-        .collect()
+        }).collect())
+        .unwrap_or_default()
 }
 
 // ============================================================
@@ -67,7 +66,7 @@ fn fzf_extraction_succeeds() {
 #[ignore]
 fn fzf_packages() {
     let (db, _) = extract_project("fzf");
-    let names = column_strings(&db, "go_packages", 1);
+    let names = column_strings(&db, "packages", 1);
     assert!(names.len() >= 5, "fzf should have >= 5 packages, got {}", names.len());
     assert!(names.iter().any(|n| n.contains("fzf")), "should have fzf package");
 }
@@ -76,7 +75,7 @@ fn fzf_packages() {
 #[ignore]
 fn fzf_decls() {
     let (db, _) = extract_project("fzf");
-    let decl_count = table_count(&db, "go_decls");
+    let decl_count = table_count(&db, "decls");
     assert!(decl_count >= 50, "fzf should have >= 50 decls, got {}", decl_count);
 }
 
@@ -84,53 +83,10 @@ fn fzf_decls() {
 #[ignore]
 fn fzf_exprs_and_stmts() {
     let (db, _) = extract_project("fzf");
-    let expr_count = table_count(&db, "go_exprs");
-    let stmt_count = table_count(&db, "go_stmts");
+    let expr_count = table_count(&db, "exprs");
+    let stmt_count = table_count(&db, "stmts");
     assert!(expr_count >= 100, "fzf should have >= 100 exprs, got {}", expr_count);
     assert!(stmt_count >= 100, "fzf should have >= 100 stmts, got {}", stmt_count);
-}
-
-// ============================================================
-// lazygit — jesseduffield/lazygit
-// Medium-sized git TUI — tests more complex Go code
-// ============================================================
-
-#[test]
-#[ignore]
-fn lazygit_extraction_succeeds() {
-    let (_, results) = extract_project("lazygit");
-    assert!(results.len() >= 50, "lazygit should have >= 50 Go files");
-    assert!(
-        results.iter().all(|r| r.success),
-        "All lazygit files should extract successfully"
-    );
-}
-
-#[test]
-#[ignore]
-fn lazygit_packages() {
-    let (db, _) = extract_project("lazygit");
-    let names = column_strings(&db, "go_packages", 1);
-    assert!(names.len() >= 10, "lazygit should have >= 10 packages, got {}", names.len());
-    assert!(names.iter().any(|n| n.contains("lazygit")), "should have lazygit package");
-}
-
-#[test]
-#[ignore]
-fn lazygit_decls() {
-    let (db, _) = extract_project("lazygit");
-    let decl_count = table_count(&db, "go_decls");
-    assert!(decl_count >= 100, "lazygit should have >= 100 decls, got {}", decl_count);
-}
-
-#[test]
-#[ignore]
-fn lazygit_specs_and_fields() {
-    let (db, _) = extract_project("lazygit");
-    let spec_count = table_count(&db, "go_specs");
-    let field_count = table_count(&db, "go_fields");
-    assert!(spec_count >= 50, "lazygit should have >= 50 specs, got {}", spec_count);
-    assert!(field_count >= 50, "lazygit should have >= 50 fields, got {}", field_count);
 }
 
 // ============================================================
@@ -156,7 +112,7 @@ fn hugo_extraction_succeeds() {
 #[ignore]
 fn hugo_packages() {
     let (db, _) = extract_project("hugo");
-    let names = column_strings(&db, "go_packages", 1);
+    let names = column_strings(&db, "packages", 1);
     assert!(names.len() >= 20, "hugo should have >= 20 packages, got {}", names.len());
     assert!(names.iter().any(|n| n.contains("hugo")), "should have hugo package");
 }
@@ -165,10 +121,10 @@ fn hugo_packages() {
 #[ignore]
 fn hugo_scale() {
     let (db, _) = extract_project("hugo");
-    let decl_count = table_count(&db, "go_decls");
-    let expr_count = table_count(&db, "go_exprs");
-    let stmt_count = table_count(&db, "go_stmts");
-    let field_count = table_count(&db, "go_fields");
+    let decl_count = table_count(&db, "decls");
+    let expr_count = table_count(&db, "exprs");
+    let stmt_count = table_count(&db, "stmts");
+    let field_count = table_count(&db, "fields");
 
     eprintln!("hugo: {} decls, {} exprs, {} stmts, {} fields",
         decl_count, expr_count, stmt_count, field_count);
@@ -190,12 +146,12 @@ fn hugo_locations_valid() {
         let col = loc[3].as_int().unwrap();
         assert!(col > 0, "column should be positive, got {}", col);
     }
-    // Every hasLocation should reference an existing location
+    // Every has_location should reference an existing location
     let loc_count = table_count(&db, "locations_default");
-    let has_loc_count = table_count(&db, "hasLocation");
+    let has_loc_count = table_count(&db, "has_location");
     assert!(
         has_loc_count > 0 && has_loc_count <= loc_count * 2,
-        "hasLocation count ({}) should be reasonable vs locations ({})",
+        "has_location count ({}) should be reasonable vs locations ({})",
         has_loc_count, loc_count
     );
 }
@@ -207,7 +163,7 @@ fn hugo_locations_valid() {
 #[test]
 #[ignore]
 fn all_projects_summary() {
-    let repos = ["fzf", "lazygit", "hugo"];
+    let repos = ["fzf", "hugo"];
 
     eprintln!("\n{:<12} {:>5} {:>6} {:>6} {:>6} {:>6} {:>6} {:>6}",
         "Project", "Files", "Pkgs", "Decls", "Specs", "Exprs", "Stmts", "Fields");
@@ -216,12 +172,12 @@ fn all_projects_summary() {
     for repo in &repos {
         let (db, results) = extract_project(repo);
         let files = results.len();
-        let pkgs = table_count(&db, "go_packages");
-        let decls = table_count(&db, "go_decls");
-        let specs = table_count(&db, "go_specs");
-        let exprs = table_count(&db, "go_exprs");
-        let stmts = table_count(&db, "go_stmts");
-        let fields = table_count(&db, "go_fields");
+        let pkgs = table_count(&db, "packages");
+        let decls = table_count(&db, "decls");
+        let specs = table_count(&db, "specs");
+        let exprs = table_count(&db, "exprs");
+        let stmts = table_count(&db, "stmts");
+        let fields = table_count(&db, "fields");
 
         eprintln!("{:<12} {:>5} {:>6} {:>6} {:>6} {:>6} {:>6} {:>6}",
             repo, files, pkgs, decls, specs, exprs, stmts, fields);

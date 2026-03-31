@@ -1,23 +1,18 @@
 [package]
-name = "ocodeql"
+name = "ocql-e2e-tests"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 
-[[bin]]
-name = "ocodeql"
-path = "src/main.rs"
-
 [dependencies]
+
+[dev-dependencies]
 ocql-schema = { path = "../ocql-schema" }
 ocql-database = { path = "../ocql-database" }
 ocql-engine = { path = "../ocql-engine" }
 ocql-ql-parser = { path = "../ocql-ql-parser" }
-ocql-hir = { path = "../ocql-hir" }
 ocql-mir = { path = "../ocql-mir" }
-ocql-models = { path = "../ocql-models" }
+ocql-lir = { path = "../ocql-lir" }
 ocql-extractor-common = { path = "../ocql-extractor-common" }
 ocql-extractor-cpp = { path = "../ocql-extractor-cpp" }
 ocql-extractor-java = { path = "../ocql-extractor-java" }
-ocql-ql-ast = { path = "../ocql-ql-ast" }
-ocql-lir = { path = "../ocql-lir" }

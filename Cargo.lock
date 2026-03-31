@@ -334,6 +334,7 @@ dependencies = [
  "ocql-extractor-cpp",
  "ocql-extractor-java",
  "ocql-hir",
+ "ocql-lir",
  "ocql-mir",
  "ocql-models",
  "ocql-ql-ast",
@@ -352,6 +353,21 @@ dependencies = [
  "ocql-schema",
  "ordered-float",
  "smallvec",
+]
+
+[[package]]
+name = "ocql-e2e-tests"
+version = "0.1.0"
+dependencies = [
+ "ocql-database",
+ "ocql-engine",
+ "ocql-extractor-common",
+ "ocql-extractor-cpp",
+ "ocql-extractor-java",
+ "ocql-lir",
+ "ocql-mir",
+ "ocql-ql-parser",
+ "ocql-schema",
 ]
 
 [[package]]
@@ -499,6 +515,16 @@ name = "ocql-hir-eval"
 version = "0.1.0"
 dependencies = [
  "ocql-hir",
+]
+
+[[package]]
+name = "ocql-lir"
+version = "0.1.0"
+dependencies = [
+ "ocql-database",
+ "ocql-mir",
+ "ocql-ql-parser",
+ "ordered-float",
 ]
 
 [[package]]

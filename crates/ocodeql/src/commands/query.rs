@@ -40,6 +40,7 @@ fn print_usage() {
     eprintln!("  ocodeql query compile <ql-file-or-string>");
     eprintln!();
     eprintln!("  --mir            Show MIR S-expression (default)");
+    eprintln!("  --lir            Show LIR relational algebra plan");
     eprintln!("  --engine         Show engine rules");
 }
 
@@ -121,13 +122,16 @@ fn run_query(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
 }
 
 fn compile(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
-    let mut show_engine = false;
+    #[derive(PartialEq)]
+    enum OutputMode { Mir, Lir, Engine }
+    let mut mode = OutputMode::Mir;
     let mut query_input = None;
 
     for arg in args {
         match arg.as_str() {
-            "--engine" => show_engine = true,
-            "--mir" => show_engine = false,
+            "--engine" => mode = OutputMode::Engine,
+            "--lir" => mode = OutputMode::Lir,
+            "--mir" => mode = OutputMode::Mir,
             _ => {
                 if query_input.is_none() {
                     query_input = Some(arg.clone());
@@ -139,14 +143,24 @@ fn compile(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
     let query_input = query_input.ok_or("usage: ocodeql query compile <ql-file-or-string>")?;
     let ql_source = read_query_source(&query_input)?;
 
-    if show_engine {
-        let program = compile_ql_to_engine(&ql_source)
-            .map_err(|e| format!("compilation failed: {}", e))?;
-        println!("{:?}", program);
-    } else {
-        let mir = compile_ql(&ql_source)
-            .map_err(|e| format!("compilation failed: {}", e))?;
-        println!("{}", print_mir(&mir));
+    match mode {
+        OutputMode::Engine => {
+            let program = compile_ql_to_engine(&ql_source)
+                .map_err(|e| format!("compilation failed: {}", e))?;
+            println!("{:?}", program);
+        }
+        OutputMode::Lir => {
+            let mir = compile_ql(&ql_source)
+                .map_err(|e| format!("compilation failed: {}", e))?;
+            let lir = ocql_lir::lower_mir(&mir)
+                .map_err(|e| format!("LIR lowering failed: {}", e))?;
+            println!("{}", ocql_lir::pretty_print(&lir));
+        }
+        OutputMode::Mir => {
+            let mir = compile_ql(&ql_source)
+                .map_err(|e| format!("compilation failed: {}", e))?;
+            println!("{}", print_mir(&mir));
+        }
     }
 
     Ok(())

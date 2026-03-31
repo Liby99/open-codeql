@@ -39,12 +39,11 @@ fn table_count(db: &Database, table: &str) -> usize {
 
 fn column_strings(db: &Database, table: &str, col: usize) -> Vec<String> {
     db.scan(table)
-        .unwrap()
-        .map(|t| match &t[col] {
+        .map(|iter| iter.map(|t| match &t[col] {
             Value::String(s) => db.strings.resolve(*s).to_string(),
             other => format!("{:?}", other),
-        })
-        .collect()
+        }).collect())
+        .unwrap_or_default()
 }
 
 // ============================================================
@@ -67,7 +66,7 @@ fn ripgrep_extraction_succeeds() {
 #[ignore]
 fn ripgrep_modules() {
     let (db, _) = extract_project("ripgrep");
-    let names = column_strings(&db, "rust_modules", 1);
+    let names = column_strings(&db, "rs_modules", 1);
     assert!(names.len() >= 10, "ripgrep should have >= 10 modules, got {}", names.len());
 }
 
@@ -75,7 +74,7 @@ fn ripgrep_modules() {
 #[ignore]
 fn ripgrep_functions() {
     let (db, _) = extract_project("ripgrep");
-    let func_count = table_count(&db, "rust_functions");
+    let func_count = table_count(&db, "rs_functions");
     assert!(func_count >= 100, "ripgrep should have >= 100 functions, got {}", func_count);
 }
 
@@ -83,7 +82,7 @@ fn ripgrep_functions() {
 #[ignore]
 fn ripgrep_structs() {
     let (db, _) = extract_project("ripgrep");
-    let struct_count = table_count(&db, "rust_structs");
+    let struct_count = table_count(&db, "rs_structs");
     assert!(struct_count >= 20, "ripgrep should have >= 20 structs, got {}", struct_count);
 }
 
@@ -91,7 +90,7 @@ fn ripgrep_structs() {
 #[ignore]
 fn ripgrep_enums() {
     let (db, _) = extract_project("ripgrep");
-    let enum_count = table_count(&db, "rust_enums");
+    let enum_count = table_count(&db, "rs_enums");
     assert!(enum_count >= 10, "ripgrep should have >= 10 enums, got {}", enum_count);
 }
 
@@ -99,7 +98,7 @@ fn ripgrep_enums() {
 #[ignore]
 fn ripgrep_traits() {
     let (db, _) = extract_project("ripgrep");
-    let trait_count = table_count(&db, "rust_traits");
+    let trait_count = table_count(&db, "rs_traits");
     assert!(trait_count >= 5, "ripgrep should have >= 5 traits, got {}", trait_count);
 }
 
@@ -107,7 +106,7 @@ fn ripgrep_traits() {
 #[ignore]
 fn ripgrep_impls() {
     let (db, _) = extract_project("ripgrep");
-    let impl_count = table_count(&db, "rust_impls");
+    let impl_count = table_count(&db, "rs_impls");
     assert!(impl_count >= 30, "ripgrep should have >= 30 impls, got {}", impl_count);
 }
 
@@ -131,7 +130,7 @@ fn bat_extraction_succeeds() {
 #[ignore]
 fn bat_functions() {
     let (db, _) = extract_project("bat");
-    let func_count = table_count(&db, "rust_functions");
+    let func_count = table_count(&db, "rs_functions");
     assert!(func_count >= 50, "bat should have >= 50 functions, got {}", func_count);
 }
 
@@ -139,7 +138,7 @@ fn bat_functions() {
 #[ignore]
 fn bat_structs() {
     let (db, _) = extract_project("bat");
-    let struct_count = table_count(&db, "rust_structs");
+    let struct_count = table_count(&db, "rs_structs");
     assert!(struct_count >= 10, "bat should have >= 10 structs, got {}", struct_count);
 }
 
@@ -147,7 +146,7 @@ fn bat_structs() {
 #[ignore]
 fn bat_enums() {
     let (db, _) = extract_project("bat");
-    let enum_count = table_count(&db, "rust_enums");
+    let enum_count = table_count(&db, "rs_enums");
     assert!(enum_count >= 5, "bat should have >= 5 enums, got {}", enum_count);
 }
 
@@ -155,7 +154,7 @@ fn bat_enums() {
 #[ignore]
 fn bat_use_decls() {
     let (db, _) = extract_project("bat");
-    let use_count = table_count(&db, "rust_use_decls");
+    let use_count = table_count(&db, "rs_use_decls");
     assert!(use_count >= 20, "bat should have >= 20 use declarations, got {}", use_count);
 }
 
@@ -179,7 +178,7 @@ fn fd_extraction_succeeds() {
 #[ignore]
 fn fd_functions() {
     let (db, _) = extract_project("fd");
-    let func_count = table_count(&db, "rust_functions");
+    let func_count = table_count(&db, "rs_functions");
     assert!(func_count >= 30, "fd should have >= 30 functions, got {}", func_count);
 }
 
@@ -187,7 +186,7 @@ fn fd_functions() {
 #[ignore]
 fn fd_structs() {
     let (db, _) = extract_project("fd");
-    let struct_count = table_count(&db, "rust_structs");
+    let struct_count = table_count(&db, "rs_structs");
     assert!(struct_count >= 5, "fd should have >= 5 structs, got {}", struct_count);
 }
 
@@ -195,7 +194,7 @@ fn fd_structs() {
 #[ignore]
 fn fd_enums() {
     let (db, _) = extract_project("fd");
-    let enum_count = table_count(&db, "rust_enums");
+    let enum_count = table_count(&db, "rs_enums");
     assert!(enum_count >= 3, "fd should have >= 3 enums, got {}", enum_count);
 }
 
@@ -203,7 +202,7 @@ fn fd_enums() {
 #[ignore]
 fn fd_attributes() {
     let (db, _) = extract_project("fd");
-    let attr_count = table_count(&db, "rust_attributes");
+    let attr_count = table_count(&db, "rs_attributes");
     assert!(attr_count >= 10, "fd should have >= 10 attributes, got {}", attr_count);
 }
 
@@ -223,14 +222,14 @@ fn all_projects_summary() {
     for repo in &repos {
         let (db, results) = extract_project(repo);
         let files = results.len();
-        let mods = table_count(&db, "rust_modules");
-        let funcs = table_count(&db, "rust_functions");
-        let structs = table_count(&db, "rust_structs");
-        let enums = table_count(&db, "rust_enums");
-        let traits = table_count(&db, "rust_traits");
-        let impls = table_count(&db, "rust_impls");
-        let uses = table_count(&db, "rust_use_decls");
-        let attrs = table_count(&db, "rust_attributes");
+        let mods = table_count(&db, "rs_modules");
+        let funcs = table_count(&db, "rs_functions");
+        let structs = table_count(&db, "rs_structs");
+        let enums = table_count(&db, "rs_enums");
+        let traits = table_count(&db, "rs_traits");
+        let impls = table_count(&db, "rs_impls");
+        let uses = table_count(&db, "rs_use_decls");
+        let attrs = table_count(&db, "rs_attributes");
 
         eprintln!("{:<12} {:>5} {:>6} {:>6} {:>6} {:>6} {:>6} {:>6} {:>6} {:>6}",
             repo, files, mods, funcs, structs, enums, traits, impls, uses, attrs);
