@@ -184,6 +184,7 @@ ClassDecl: ClassDecl = {
         supertypes: supers,
         instanceof: vec![],
         members,
+        is_union: false,
         span: Span::new(l, r),
     },
     <l:@L> <anns:Annotation*> "class" <name:UpperNameRule>
@@ -196,6 +197,7 @@ ClassDecl: ClassDecl = {
         supertypes: supers,
         instanceof: inst,
         members,
+        is_union: false,
         span: Span::new(l, r),
     },
     <l:@L> <anns:Annotation*> "class" <name:UpperNameRule>
@@ -206,6 +208,7 @@ ClassDecl: ClassDecl = {
         supertypes: vec![],
         instanceof: vec![],
         members,
+        is_union: false,
         span: Span::new(l, r),
     },
     <l:@L> <anns:Annotation*> "class" <name:UpperNameRule>
@@ -217,6 +220,7 @@ ClassDecl: ClassDecl = {
         supertypes: vec![],
         instanceof: inst,
         members,
+        is_union: false,
         span: Span::new(l, r),
     },
     <l:@L> <anns:Annotation*> "class" <name:UpperNameRule> "=" <ty:TypeExprRule> ";" <r:@R> =>
@@ -226,6 +230,7 @@ ClassDecl: ClassDecl = {
         supertypes: vec![ty],
         instanceof: vec![],
         members: vec![],
+        is_union: false,
         span: Span::new(l, r),
     },
     // Type union alias: class X = A or B or C;
@@ -236,6 +241,7 @@ ClassDecl: ClassDecl = {
         supertypes: { let mut v = vec![first]; v.extend(rest); v },
         instanceof: vec![],
         members: vec![],
+        is_union: true,
         span: Span::new(l, r),
     },
     // Signature class (no body): signature class Foo;
@@ -246,6 +252,7 @@ ClassDecl: ClassDecl = {
         supertypes: vec![],
         instanceof: vec![],
         members: vec![],
+        is_union: false,
         span: Span::new(l, r),
     },
     // Signature class with instanceof, no body: signature class Foo instanceof Bar;
@@ -256,6 +263,7 @@ ClassDecl: ClassDecl = {
         supertypes: vec![],
         instanceof: inst,
         members: vec![],
+        is_union: false,
         span: Span::new(l, r),
     },
     // Signature class with extends, no body: signature class Foo extends Bar;
@@ -266,6 +274,7 @@ ClassDecl: ClassDecl = {
         supertypes: supers,
         instanceof: vec![],
         members: vec![],
+        is_union: false,
         span: Span::new(l, r),
     },
     // Signature class with both extends and instanceof, no body:
@@ -277,6 +286,7 @@ ClassDecl: ClassDecl = {
         supertypes: supers,
         instanceof: inst,
         members: vec![],
+        is_union: false,
         span: Span::new(l, r),
     },
 };

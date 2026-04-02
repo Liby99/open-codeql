@@ -437,6 +437,29 @@ fn empty_result() {
 // ============================================================
 
 #[test]
+fn type_union_or_semantics() {
+    // Type union alias: `class Both = A or B;` should use OR semantics,
+    // not AND. Both#char should contain entities from A OR B.
+    let mir = compile_ql(r#"
+        class Both = @stmt or @expr;
+    "#).expect("compile failed");
+    // Should produce 2 separate rules (one per variant), not 1 conjunctive rule
+    let char_preds: Vec<_> = mir.predicates.iter()
+        .filter(|p| p.name == "Both#char")
+        .collect();
+    assert_eq!(char_preds.len(), 2, "type union should produce 2 rules (one per OR variant)");
+    // Each rule should have a conjunction of exactly 1 atom (the variant's #char)
+    for pred in &char_preds {
+        match &pred.body {
+            MirBody::Conjunction(atoms) => {
+                assert_eq!(atoms.len(), 1, "each union variant rule should have 1 atom");
+            }
+            _ => panic!("expected Conjunction body for union variant rule"),
+        }
+    }
+}
+
+#[test]
 fn parse_error_reported() {
     let result = compile_ql("this is not valid QL !!!");
     assert!(result.is_err());

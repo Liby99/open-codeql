@@ -18,3 +18,5 @@ ocql-lir = { path = "../ocql-lir" }
 ocql-extractor-common = { path = "../ocql-extractor-common" }
 ocql-extractor-cpp = { path = "../ocql-extractor-cpp" }
 ocql-extractor-java = { path = "../ocql-extractor-java" }
+ocql-result = { path = "../ocql-result" }
+serde_json = "1"

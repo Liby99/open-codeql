@@ -48,6 +48,9 @@ pub struct ClassDecl {
     pub supertypes: Vec<TypeExpr>,
     pub instanceof: Vec<TypeExpr>,
     pub members: Vec<ClassMember>,
+    /// True for type union aliases: `class T = A or B;` (OR semantics).
+    /// False for regular extends classes: `class T extends A, B { }` (AND semantics).
+    pub is_union: bool,
     pub span: Span,
 }
 

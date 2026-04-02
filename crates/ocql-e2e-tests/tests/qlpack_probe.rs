@@ -97,36 +97,25 @@ fn probe_inner() {
                 let count = db.scan(name).map(|i| i.count()).unwrap_or(0);
                 eprintln!("  {}: {} rows", name, count);
             }
-            // List sample relations
-            let mut char_rels: Vec<(String, usize)> = db.relation_names()
+            // Count non-empty #char relations
+            let nonempty_count = db.relation_names()
                 .filter(|n| n.contains("#char"))
-                .map(|s| {
-                    let count = db.scan(s).map(|i| i.count()).unwrap_or(0);
-                    (s.to_string(), count)
-                })
-                .collect();
-            let total_char = char_rels.len();
-            let nonempty: Vec<&(String, usize)> = char_rels.iter().filter(|(_, c)| *c > 0).collect();
-            eprintln!("  #char relations: {} total, {} non-empty", total_char, nonempty.len());
-            if !nonempty.is_empty() {
-                for (name, count) in &nonempty[..nonempty.len().min(20)] {
-                    eprintln!("    {} = {} rows", name, count);
-                }
-            }
-            // Also check key base tables
-            for name in ["files", "folders", "containerparent", "numlines",
-                         "functions", "fun_decls", "fun_def", "mangled_name", "manglednames",
-                         "locations_default", "element_location"] {
+                .filter(|n| db.scan(n).map(|i| i.count()).unwrap_or(0) > 0)
+                .count();
+            let total_char = db.relation_names()
+                .filter(|n| n.contains("#char"))
+                .count();
+            eprintln!("  #char relations: {} total, {} non-empty", total_char, nonempty_count);
+
+            // Check key predicates
+            for name in ["File#char", "Folder#char", "Container#char",
+                         "Location#char", "Function#char", "Declaration#char",
+                         "Element#char", "Locatable#char",
+                         "ControlFlowNode#char", "AccessHolder#char",
+                         "Variable#char", "Stmt#char", "Expr#char",
+                         "Namespace#char", "Comment#char"] {
                 let count = db.scan(name).map(|i| i.count()).unwrap_or(0);
                 eprintln!("  {}: {} rows", name, count);
-            }
-            // Check for key class char predicates (including simple ones)
-            for name in ["File#char", "Folder#char", "Location#char", "Container#char",
-                         "Function#char", "Element#char", "Declaration#char",
-                         "Locatable#char", "TopLevelElement#char"] {
-                let exists = db.relation(name).is_some();
-                let count = db.scan(name).map(|i| i.count()).unwrap_or(0);
-                eprintln!("  {} exists={}, rows={}", name, exists, count);
             }
         }
         Err(e) => {

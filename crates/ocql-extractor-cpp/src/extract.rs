@@ -102,8 +102,10 @@ const EXPR_LOGAND: i64 = 65;
 const EXPR_LOGOR: i64 = 66;
 const EXPR_COMMA: i64 = 67;
 const EXPR_SUBSCRIPT: i64 = 68;
+#[allow(dead_code)]
 const EXPR_CALL: i64 = 74;
 const EXPR_VARACCESS: i64 = 84;
+const EXPR_ROUTINEEXPR: i64 = 97;
 const EXPR_SIZEOF: i64 = 93;
 const EXPR_LITERAL: i64 = 140;
 const EXPR_CAST: i64 = 141;
@@ -135,6 +137,85 @@ impl Extractor for CppExtractor {
     ) {
         let root = tree.root_node();
         extract_translation_unit(emitter, file_id, &root, source);
+        resolve_call_bindings(emitter);
+    }
+}
+
+/// Post-extraction pass: resolve call bindings (funbind table).
+///
+/// For each call expression (kind 97 / @routineexpr), find the callee identifier
+/// (child at index 0 in exprparents), look up its name from valuetext, and resolve
+/// it to a function entity from the functions table. Emits funbind(call_id, func_id).
+fn resolve_call_bindings(emitter: &mut FactEmitter<'_>) {
+    use std::collections::{HashMap, HashSet};
+
+    // Step 1: Find all kind-97 (routineexpr) expression entity IDs
+    let call_ids: HashSet<EntityId> = emitter.db.scan("exprs")
+        .into_iter()
+        .flatten()
+        .filter(|t| t[1] == Value::Int(EXPR_ROUTINEEXPR))
+        .filter_map(|t| match t[0] { Value::Entity(id) => Some(id), _ => None })
+        .collect();
+
+    if call_ids.is_empty() {
+        return;
+    }
+
+    // Step 2: For each call, find the child expression at index 0 (callee identifier)
+    let callee_of_call: HashMap<EntityId, EntityId> = emitter.db.scan("exprparents")
+        .into_iter()
+        .flatten()
+        .filter(|t| t[1] == Value::Int(0)) // child_index = 0
+        .filter_map(|t| {
+            if let (Value::Entity(child), Value::Entity(parent)) = (&t[0], &t[2]) {
+                if call_ids.contains(parent) {
+                    return Some((*parent, *child));
+                }
+            }
+            None
+        })
+        .collect();
+
+    // Step 3: Get valuetext for each callee entity
+    let callee_entity_ids: HashSet<EntityId> = callee_of_call.values().copied().collect();
+    let valuetext_map: HashMap<EntityId, Value> = emitter.db.scan("valuetext")
+        .into_iter()
+        .flatten()
+        .filter_map(|t| {
+            if let Value::Entity(id) = &t[0] {
+                if callee_entity_ids.contains(id) {
+                    return Some((*id, t[1].clone()));
+                }
+            }
+            None
+        })
+        .collect();
+
+    // Step 4: Build function name → entity ID map
+    let func_map: HashMap<Value, EntityId> = emitter.db.scan("functions")
+        .into_iter()
+        .flatten()
+        .filter_map(|t| {
+            if let Value::Entity(id) = &t[0] {
+                return Some((t[1].clone(), *id));
+            }
+            None
+        })
+        .collect();
+
+    // Step 5: Resolve and collect funbind pairs
+    let mut bindings = Vec::new();
+    for (&call_id, &callee_id) in &callee_of_call {
+        if let Some(name_val) = valuetext_map.get(&callee_id) {
+            if let Some(&func_id) = func_map.get(name_val) {
+                bindings.push((call_id, func_id));
+            }
+        }
+    }
+
+    // Step 6: Emit funbind rows
+    for (call_id, func_id) in bindings {
+        emitter.emit("funbind", vec![Value::Entity(call_id), Value::Entity(func_id)]);
     }
 }
 
@@ -1579,7 +1660,7 @@ fn extract_expr(
         "number_literal" | "string_literal" | "char_literal" | "true" | "false" | "null"
         | "string_content" | "concatenated_string" => Some(EXPR_LITERAL),
         "identifier" => Some(EXPR_VARACCESS),
-        "call_expression" => Some(EXPR_CALL),
+        "call_expression" => Some(EXPR_ROUTINEEXPR),
         "parenthesized_expression" => Some(EXPR_PAREXPR),
         "conditional_expression" => Some(EXPR_CONDITIONAL),
         "subscript_expression" => Some(EXPR_SUBSCRIPT),
@@ -1669,10 +1750,18 @@ fn extract_expr(
     // Recurse into child expressions
     match node.kind() {
         "call_expression" => {
-            // function (child 0), arguments (child 1)
+            // Emit iscall(expr_id, 0) — marks this expression as a function call
+            emitter.emit("iscall", vec![
+                Value::Entity(expr_id),
+                Value::Int(0),
+            ]);
+
+            // Callee function name (child 0) — extracted as child expression for
+            // backward compatibility, also used for funbind resolution post-pass
             if let Some(func) = node.child_by_field("function") {
                 extract_expr(emitter, file_id, &func, source, expr_id, 0, enclosing_func);
             }
+            // Arguments (children 1+)
             if let Some(args) = node.child_by_field("arguments") {
                 let mut idx = 1i64;
                 let mut cursor = args.walk();
@@ -2114,8 +2203,8 @@ mod tests {
         let exprs: Vec<_> = db.scan("exprs").unwrap().collect();
         let kinds: Vec<i64> = exprs.iter().map(|t| t[1].as_int().unwrap()).collect();
         eprintln!("Expression kinds: {:?}", kinds);
-        // Should have call expressions (kind 74)
-        assert!(kinds.contains(&EXPR_CALL), "Should have call expressions");
+        // Should have call expressions (kind 97, @routineexpr)
+        assert!(kinds.contains(&EXPR_ROUTINEEXPR), "Should have call expressions");
         // Should have variable accesses (kind 84)
         assert!(kinds.contains(&EXPR_VARACCESS), "Should have variable accesses");
         // Should have addition (kind 25)
@@ -2276,5 +2365,18 @@ mod tests {
             let line = loc[2].as_int().unwrap();
             assert!(line > 0, "Line numbers should be positive, got {}", line);
         }
+    }
+
+    #[test]
+    fn test_iscall_and_funbind() {
+        let db = extract_test_file("simple.c");
+        let iscall_rows: Vec<_> = db.scan("iscall").unwrap().collect();
+        let funbind_rows: Vec<_> = db.scan("funbind").unwrap().collect();
+        eprintln!("iscall rows: {}", iscall_rows.len());
+        eprintln!("funbind rows: {}", funbind_rows.len());
+        // simple.c has function calls (e.g., printf, add, etc.)
+        assert!(!iscall_rows.is_empty(), "Should have iscall entries for call expressions");
+        // funbind should resolve at least some calls to defined functions
+        assert!(!funbind_rows.is_empty(), "Should have funbind entries for resolved calls");
     }
 }

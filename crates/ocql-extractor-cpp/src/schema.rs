@@ -279,6 +279,54 @@ element_location(
          | @stmt | @expr | @comment | @include | @fun_decl
          | @mangledname_entity
 
+/* ========== Union types (matches vendor semmlecode.cpp.dbscheme) ========== */
+
+/* Core hierarchy */
+@declaration = @function | @usertype | @variable | @enumconstant
+@locatable = @element
+@member = @membervariable | @function | @usertype | @enumconstant
+@namedscope = @namespace | @usertype
+@namespacembr = @declaration | @namespace
+
+/* Variable hierarchy */
+@localscopevariable = @localvariable
+
+/* Access & addressable */
+@addressable = @function | @variable
+@accessible = @addressable | @enumconstant
+@access = @expr
+
+/* Control flow & parents */
+@cfgnode = @stmt | @expr | @function
+@exprparent = @element
+@stmtparent = @stmt | @expr
+@parameterized_element = @function
+
+/* Scoping */
+@enclosingfunction_child = @usertype | @variable | @namespace
+
+/* Expression operator hierarchy (simplified - maps our expr kinds to vendor union types) */
+@assign_expr = @expr
+@op_expr = @expr
+@un_op_expr = @expr
+@bin_op_expr = @expr
+@conversion = @expr
+@funbindexpr = @expr
+@varbindexpr = @expr
+@literal = @expr
+
+/* ========== Call binding ========== */
+
+iscall(
+    unique int caller: @funbindexpr ref,
+    int kind: int ref
+);
+
+funbind(
+    int expr: @funbindexpr ref,
+    int fun: @function ref
+);
+
 /* ========== Enclosing function ========== */
 
 enclosingfunction(

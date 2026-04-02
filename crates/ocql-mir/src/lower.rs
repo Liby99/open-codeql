@@ -303,31 +303,28 @@ fn lower_predicate(
 // ============================================================
 
 /// Build supertype constraint atoms from a class's supertypes list.
-fn supertype_atoms(supertypes: &[TypeExpr]) -> Vec<MirAtom> {
+/// Skips `ClassName` supertypes that match the class's own name (true self-references).
+/// Does NOT skip `ModuleAccess` supertypes even if the member name matches, since
+/// `Impl::File` is semantically distinct from `File` (it's a module-scoped type).
+fn supertype_atoms(supertypes: &[TypeExpr], self_name: &str) -> Vec<MirAtom> {
+    let self_char = format!("{}#char", self_name);
     let mut atoms = Vec::new();
     for sup in supertypes {
-        match &sup.kind {
-            TypeExprKind::ClassName(name) => {
-                atoms.push(MirAtom::Scan(MirScan::new(
-                    &format!("{}#char", name.name),
-                    vec![MirTerm::var("this")],
-                )));
-            }
-            TypeExprKind::Database(db_type) => {
-                // @typename → scan @typename#char (seeded by engine from schema)
-                atoms.push(MirAtom::Scan(MirScan::new(
-                    &format!("{}#char", db_type),
-                    vec![MirTerm::var("this")],
-                )));
-            }
-            TypeExprKind::ModuleAccess(_, member) => {
-                // Module::Type → use the member type's char predicate
-                atoms.push(MirAtom::Scan(MirScan::new(
-                    &format!("{}#char", member.name),
-                    vec![MirTerm::var("this")],
-                )));
-            }
-            _ => {} // Primitives handled elsewhere
+        let (char_name, is_module_access) = match &sup.kind {
+            TypeExprKind::ClassName(name) => (format!("{}#char", name.name), false),
+            TypeExprKind::Database(db_type) => (format!("@{}#char", db_type), false),
+            TypeExprKind::ModuleAccess(_, member) => (format!("{}#char", member.name), true),
+            _ => continue, // Primitives — skip
+        };
+        // Skip self-referential constraints for direct ClassName refs only.
+        // ModuleAccess supertypes (Impl::File) are kept even if the member name
+        // matches, since they represent a different (module-scoped) class that
+        // happens to share the name.
+        if is_module_access || char_name != self_char {
+            atoms.push(MirAtom::Scan(MirScan::new(
+                &char_name,
+                vec![MirTerm::var("this")],
+            )));
         }
     }
     atoms
@@ -335,18 +332,39 @@ fn supertype_atoms(supertypes: &[TypeExpr]) -> Vec<MirAtom> {
 
 fn lower_class(ctx: &mut LowerCtx, class: &ClassDecl) -> Result<(), LowerError> {
     let class_name = &class.name.name;
+    let char_name = format!("{}#char", class_name);
+
+    // Type union aliases: `class T = @type1 or @type2;`
+    // Generate one rule per variant (OR semantics):
+    //   T#char(this) :- @type1#char(this).
+    //   T#char(this) :- @type2#char(this).
+    if class.is_union {
+        let variant_atoms = supertype_atoms(&class.supertypes, class_name);
+        for atom in variant_atoms {
+            ctx.emit_predicate(MirPredicate::new(
+                &char_name,
+                vec![MirParam::new("this", MirType::Any)],
+                vec![atom],
+            ));
+        }
+        return Ok(());
+    }
+
+    // Regular class: AND semantics for supertypes + instanceof
+    let mut all_type_constraints = supertype_atoms(&class.supertypes, class_name);
+    all_type_constraints.extend(supertype_atoms(&class.instanceof, class_name));
 
     let mut has_char_pred = false;
     for member in &class.members {
         match member {
             ClassMember::CharacteristicPredicate { body, .. } => {
                 has_char_pred = true;
-                let mut atoms = supertype_atoms(&class.supertypes);
+                let mut atoms = all_type_constraints.clone();
 
-                lower_formula(ctx, body, &mut atoms, &format!("{}#char", class_name))?;
+                lower_formula(ctx, body, &mut atoms, &char_name)?;
 
                 ctx.emit_predicate(MirPredicate::new(
-                    &format!("{}#char", class_name),
+                    &char_name,
                     vec![MirParam::new("this", MirType::Any)],
                     atoms,
                 ));
@@ -361,16 +379,13 @@ fn lower_class(ctx: &mut LowerCtx, class: &ClassDecl) -> Result<(), LowerError> 
     }
 
     // If no explicit characteristic predicate, generate an implicit one
-    // from supertypes: ClassName#char(this) :- Super1#char(this), Super2#char(this).
-    if !has_char_pred {
-        let atoms = supertype_atoms(&class.supertypes);
-        if !atoms.is_empty() {
-            ctx.emit_predicate(MirPredicate::new(
-                &format!("{}#char", class_name),
-                vec![MirParam::new("this", MirType::Any)],
-                atoms,
-            ));
-        }
+    // from supertypes + instanceof: ClassName#char(this) :- Super1#char(this), ...
+    if !has_char_pred && !all_type_constraints.is_empty() {
+        ctx.emit_predicate(MirPredicate::new(
+            &char_name,
+            vec![MirParam::new("this", MirType::Any)],
+            all_type_constraints,
+        ));
     }
 
     Ok(())

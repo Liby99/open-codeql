@@ -1,0 +1,4 @@
+name: oqlpack/java-all
+version: 0.1.0
+dbscheme: config/semmlecode.dbscheme
+library: true

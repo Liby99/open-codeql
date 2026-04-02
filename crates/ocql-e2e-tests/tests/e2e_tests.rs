@@ -676,3 +676,109 @@ fn ql_set_literal_multiple() {
     assert!(result.contains("main"), "got: {:?}", result);
     assert!(result.contains("helper"), "got: {:?}", result);
 }
+
+// ============================================================
+// Type unions and database type classes
+// ============================================================
+
+/// Type union alias with OR semantics: class Both = A or B produces the union.
+#[test]
+fn ql_type_union_or_semantics() {
+    let mut db = extract_c("basic.c");
+    eval_ql(r#"
+        class Func extends int {
+            Func() { functions(this, _, _) }
+        }
+        class Loc extends int {
+            Loc() { localvariables(this, _, _) }
+        }
+        class FuncOrLocal = Func or Loc;
+        predicate union_count(int x) {
+            FuncOrLocal(x)
+        }
+    "#, &mut db);
+
+    let func_count = count_rows(&db, "Func#char");
+    let local_count = count_rows(&db, "Loc#char");
+    let union_count = count_rows(&db, "FuncOrLocal#char");
+    // Union should have at least as many entities as each individual type
+    assert!(union_count >= func_count, "union {} >= funcs {}", union_count, func_count);
+    assert!(union_count >= local_count, "union {} >= locals {}", union_count, local_count);
+    // Union should have entities from both (assuming no overlap)
+    assert!(union_count > 0, "union should have at least 1 entity");
+}
+
+/// Database type class: extending @function directly seeds from schema #char.
+#[test]
+fn ql_database_type_char() {
+    let mut db = extract_c("basic.c");
+    // The engine seeds @function#char from the functions table.
+    // A class extending @function should inherit those entities.
+    eval_ql(r#"
+        class MyFunc extends @function {
+            string getName() { functions(this, result, _) }
+        }
+    "#, &mut db);
+
+    let char_count = count_rows(&db, "MyFunc#char");
+    assert_eq!(char_count, 3, "basic.c has 3 functions, MyFunc#char should have 3, got {}", char_count);
+}
+
+// ============================================================
+// Security: dangerous function call detection via expression tree
+// ============================================================
+
+/// Standalone security query: find calls to dangerous C functions by examining
+/// call expressions and their callee names in the expression tree.
+/// This validates the query logic that the full vendor security test uses.
+#[test]
+fn c_security_dangerous_call_detection() {
+    let mut db = extract_c("security.c");
+    eval_ql(r#"
+        predicate isDangerousName(string name) {
+            name = "gets" or
+            name = "strcpy" or
+            name = "sprintf" or
+            name = "strcat"
+        }
+
+        predicate dangerousCall(int call_id, string callee_name) {
+            exprs(call_id, 97, _) and
+            exprparents(callee_id, 0, call_id) and
+            valuetext(callee_id, callee_name) and
+            isDangerousName(callee_name)
+        }
+
+        predicate dangerousFinding(string callee_name, string in_function) {
+            dangerousCall(call_id, callee_name) and
+            enclosingfunction(call_id, func_id) and
+            functions(func_id, in_function, _)
+        }
+    "#, &mut db);
+
+    let findings: Vec<(String, String)> = db.scan("dangerousFinding").unwrap()
+        .map(|row| {
+            let callee = match &row[0] {
+                Value::String(s) => db.strings.resolve(*s).to_string(),
+                _ => "?".to_string(),
+            };
+            let caller = match &row[1] {
+                Value::String(s) => db.strings.resolve(*s).to_string(),
+                _ => "?".to_string(),
+            };
+            (callee, caller)
+        })
+        .collect();
+
+    eprintln!("Security findings: {:?}", findings);
+
+    let callee_names: HashSet<String> = findings.iter().map(|(c, _)| c.clone()).collect();
+    assert!(callee_names.contains("gets"), "Should find gets() call, got: {:?}", findings);
+    assert!(callee_names.contains("strcpy"), "Should find strcpy() call, got: {:?}", findings);
+
+    // Verify context: gets is called from dangerous_gets, strcpy from dangerous_strcpy
+    assert!(findings.contains(&("gets".to_string(), "dangerous_gets".to_string())),
+        "gets() should be in dangerous_gets(), got: {:?}", findings);
+    assert!(findings.contains(&("strcpy".to_string(), "dangerous_strcpy".to_string())),
+        "strcpy() should be in dangerous_strcpy(), got: {:?}", findings);
+}
