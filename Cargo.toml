@@ -24,7 +24,9 @@ members = [
     "crates/ocql-extractor-swift",
     "crates/ocodeql",
     "crates/ocql-lir",
+    "crates/ocql-result",
     "crates/ocql-e2e-tests",
+    "crates/ocql-lsp",
 ]
 
 [workspace.package]
