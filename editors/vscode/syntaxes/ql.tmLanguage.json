@@ -1,0 +1,181 @@
+{
+  "$schema": "https://raw.githubusercontent.com/martinring/tmlanguage/master/tmlanguage.json",
+  "name": "QL",
+  "scopeName": "source.ql",
+  "patterns": [
+    { "include": "#comments" },
+    { "include": "#strings" },
+    { "include": "#annotations" },
+    { "include": "#keywords" },
+    { "include": "#aggregates" },
+    { "include": "#types" },
+    { "include": "#constants" },
+    { "include": "#numbers" },
+    { "include": "#operators" },
+    { "include": "#identifiers" }
+  ],
+  "repository": {
+    "comments": {
+      "patterns": [
+        {
+          "name": "comment.block.documentation.ql",
+          "begin": "/\\*\\*",
+          "end": "\\*/",
+          "patterns": [
+            {
+              "name": "keyword.other.documentation.ql",
+              "match": "@\\w+"
+            }
+          ]
+        },
+        {
+          "name": "comment.block.ql",
+          "begin": "/\\*",
+          "end": "\\*/"
+        },
+        {
+          "name": "comment.line.double-slash.ql",
+          "match": "//.*$"
+        }
+      ]
+    },
+    "strings": {
+      "patterns": [
+        {
+          "name": "string.quoted.double.ql",
+          "begin": "\"",
+          "end": "\"",
+          "patterns": [
+            {
+              "name": "constant.character.escape.ql",
+              "match": "\\\\."
+            }
+          ]
+        }
+      ]
+    },
+    "annotations": {
+      "patterns": [
+        {
+          "name": "storage.modifier.ql",
+          "match": "\\b(abstract|cached|deprecated|external|extensible|final|transient|additional|library|private|override|default|language|pragma|query|signature|inline|inline_late|noinline|nomagic|noopt|only_bind_out|only_bind_into|monotonicAggregates)\\b"
+        },
+        {
+          "name": "storage.modifier.ql",
+          "match": "\\b(bindingset)\\b"
+        },
+        {
+          "comment": "overlay annotation: overlay[local], overlay[global?], etc.",
+          "name": "storage.modifier.ql",
+          "match": "\\boverlay\\b"
+        }
+      ]
+    },
+    "keywords": {
+      "patterns": [
+        {
+          "name": "keyword.control.ql",
+          "match": "\\b(if|then|else|and|or|not|implies|forall|forex|exists|in)\\b"
+        },
+        {
+          "name": "keyword.declaration.ql",
+          "match": "\\b(import|module|class|predicate|newtype|from|where|select|as|extends|instanceof|implements)\\b"
+        },
+        {
+          "name": "keyword.other.ql",
+          "match": "\\b(order|by|asc|desc|unique)\\b"
+        },
+        {
+          "name": "variable.language.ql",
+          "match": "\\b(this|result|super)\\b"
+        },
+        {
+          "name": "keyword.other.ql",
+          "match": "\\b(none|any)\\b"
+        }
+      ]
+    },
+    "aggregates": {
+      "patterns": [
+        {
+          "name": "support.function.aggregate.ql",
+          "match": "\\b(avg|concat|count|max|min|rank|strictconcat|strictcount|strictsum|sum)\\b"
+        }
+      ]
+    },
+    "types": {
+      "patterns": [
+        {
+          "name": "support.type.primitive.ql",
+          "match": "\\b(boolean|date|float|int|string)\\b"
+        },
+        {
+          "comment": "Database types: @identifier",
+          "name": "support.type.database.ql",
+          "match": "@[a-zA-Z_][a-zA-Z0-9_]*"
+        },
+        {
+          "comment": "Upper-case identifiers are typically type/class names",
+          "name": "entity.name.type.ql",
+          "match": "\\b[A-Z][a-zA-Z0-9_]*\\b"
+        }
+      ]
+    },
+    "constants": {
+      "patterns": [
+        {
+          "name": "constant.language.boolean.ql",
+          "match": "\\b(true|false)\\b"
+        }
+      ]
+    },
+    "numbers": {
+      "patterns": [
+        {
+          "name": "constant.numeric.float.ql",
+          "match": "\\b[0-9]+\\.[0-9]+\\b"
+        },
+        {
+          "name": "constant.numeric.integer.ql",
+          "match": "\\b[0-9]+\\b"
+        }
+      ]
+    },
+    "operators": {
+      "patterns": [
+        {
+          "name": "keyword.operator.comparison.ql",
+          "match": "!=|<=|>=|=|<|>"
+        },
+        {
+          "name": "keyword.operator.arithmetic.ql",
+          "match": "[+\\-*/%]"
+        },
+        {
+          "name": "keyword.operator.closure.ql",
+          "match": "[+*](?=\\()"
+        },
+        {
+          "name": "keyword.operator.range.ql",
+          "match": "\\.\\."
+        },
+        {
+          "name": "punctuation.accessor.ql",
+          "match": "::"
+        },
+        {
+          "name": "keyword.operator.pipe.ql",
+          "match": "\\|"
+        }
+      ]
+    },
+    "identifiers": {
+      "patterns": [
+        {
+          "name": "variable.other.ql",
+          "match": "\\b[a-z_][a-zA-Z0-9_]*\\b"
+        }
+      ]
+    }
+  }
+}

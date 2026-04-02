@@ -1,0 +1,65 @@
+{
+  "name": "open-codeql",
+  "displayName": "Open CodeQL",
+  "description": "QL language support: syntax highlighting and diagnostics for .ql and .qll files",
+  "version": "0.1.0",
+  "publisher": "open-codeql",
+  "license": "Apache-2.0",
+  "engines": {
+    "vscode": "^1.75.0"
+  },
+  "categories": [
+    "Programming Languages"
+  ],
+  "activationEvents": [
+    "onLanguage:ql"
+  ],
+  "main": "./out/extension.js",
+  "contributes": {
+    "languages": [
+      {
+        "id": "ql",
+        "aliases": [
+          "QL",
+          "CodeQL"
+        ],
+        "extensions": [
+          ".ql",
+          ".qll"
+        ],
+        "configuration": "./language-configuration.json"
+      }
+    ],
+    "grammars": [
+      {
+        "language": "ql",
+        "scopeName": "source.ql",
+        "path": "./syntaxes/ql.tmLanguage.json"
+      }
+    ],
+    "configuration": {
+      "type": "object",
+      "title": "Open CodeQL",
+      "properties": {
+        "open-codeql.serverPath": {
+          "type": "string",
+          "default": "",
+          "description": "Path to the ocql-lsp binary. If empty, looks for 'ocql-lsp' on PATH or in the workspace target/release directory."
+        }
+      }
+    }
+  },
+  "scripts": {
+    "vscode:prepublish": "npm run compile",
+    "compile": "tsc -p ./",
+    "watch": "tsc -watch -p ./"
+  },
+  "dependencies": {
+    "vscode-languageclient": "^9.0.1"
+  },
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "@types/vscode": "^1.75.0",
+    "typescript": "^5.4.0"
+  }
+}
