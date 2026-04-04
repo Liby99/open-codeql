@@ -63,7 +63,7 @@ fn result_pipeline_dangerous_functions() {
             name = "gets" or name = "strcpy" or name = "sprintf" or name = "strcat"
         }
         predicate dangerousCall(int call_id, string callee_name) {
-            exprs(call_id, 97, _) and
+            exprs(call_id, 74, _) and
             exprparents(callee_id, 0, call_id) and
             valuetext(callee_id, callee_name) and
             isDangerousName(callee_name)
@@ -149,7 +149,7 @@ fn result_pipeline_select_result_extraction() {
             name = "gets" or name = "strcpy" or name = "sprintf" or name = "strcat"
         }
         predicate dangerousCall(int call_id, string callee_name) {
-            exprs(call_id, 97, _) and
+            exprs(call_id, 74, _) and
             exprparents(callee_id, 0, call_id) and
             valuetext(callee_id, callee_name) and
             isDangerousName(callee_name)

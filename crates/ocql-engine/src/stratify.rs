@@ -2,7 +2,8 @@
 //!
 //! Groups rules into strata such that negated predicates are always
 //! fully computed in a prior stratum. Uses Tarjan's SCC algorithm
-//! on the predicate dependency graph.
+//! on the predicate dependency graph with integer-indexed arrays
+//! for performance on large programs (48K+ predicates).
 
 use std::collections::{HashMap, HashSet};
 
@@ -47,124 +48,125 @@ enum EdgeKind {
 /// Returns an ordered list of strata (evaluate in order) or an error
 /// if the program is not stratifiable (negation cycle).
 pub fn stratify(program: &Program) -> Result<Vec<Stratum>, StratificationError> {
-    // 1. Collect all IDB predicates (those appearing in rule heads)
-    let idb_preds: HashSet<String> = program.rules.iter()
-        .map(|r| r.head.predicate.clone())
+    // 1. Collect all IDB predicates and assign numeric indices
+    let idb_preds: HashSet<&str> = program.rules.iter()
+        .map(|r| r.head.predicate.as_str())
         .collect();
 
-    // 2. Build predicate dependency graph
-    let mut edges: HashMap<String, Vec<(String, EdgeKind)>> = HashMap::new();
-    for pred in &idb_preds {
-        edges.entry(pred.clone()).or_default();
-    }
+    let mut pred_names: Vec<&str> = idb_preds.iter().copied().collect();
+    pred_names.sort_unstable(); // deterministic ordering
+
+    let pred_to_idx: HashMap<&str, usize> = pred_names.iter()
+        .enumerate()
+        .map(|(i, &p)| (p, i))
+        .collect();
+    let n = pred_names.len();
+
+    // 2. Build integer-indexed dependency graph
+    let mut edges: Vec<Vec<(usize, EdgeKind)>> = vec![Vec::new(); n];
 
     for rule in &program.rules {
-        let head = &rule.head.predicate;
-        for elem in &rule.body {
-            match elem {
-                BodyElement::Positive(atom) => {
-                    if idb_preds.contains(&atom.predicate) {
-                        edges.entry(head.clone()).or_default()
-                            .push((atom.predicate.clone(), EdgeKind::Positive));
+        if let Some(&head_idx) = pred_to_idx.get(rule.head.predicate.as_str()) {
+            for elem in &rule.body {
+                match elem {
+                    BodyElement::Positive(atom) => {
+                        if let Some(&dep_idx) = pred_to_idx.get(atom.predicate.as_str()) {
+                            edges[head_idx].push((dep_idx, EdgeKind::Positive));
+                        }
                     }
-                }
-                BodyElement::Negated(atom) => {
-                    if idb_preds.contains(&atom.predicate) {
-                        edges.entry(head.clone()).or_default()
-                            .push((atom.predicate.clone(), EdgeKind::Negative));
+                    BodyElement::Negated(atom) => {
+                        if let Some(&dep_idx) = pred_to_idx.get(atom.predicate.as_str()) {
+                            edges[head_idx].push((dep_idx, EdgeKind::Negative));
+                        }
                     }
-                }
-                BodyElement::Aggregate { sub_rule, .. } => {
-                    // Aggregated predicates are like negation (must be fully computed first)
-                    for sub_elem in &sub_rule.body {
-                        if let BodyElement::Positive(atom) = sub_elem {
-                            if idb_preds.contains(&atom.predicate) {
-                                edges.entry(head.clone()).or_default()
-                                    .push((atom.predicate.clone(), EdgeKind::Negative));
+                    BodyElement::Aggregate { sub_rule, .. } => {
+                        for sub_elem in &sub_rule.body {
+                            if let BodyElement::Positive(atom) = sub_elem {
+                                if let Some(&dep_idx) = pred_to_idx.get(atom.predicate.as_str()) {
+                                    edges[head_idx].push((dep_idx, EdgeKind::Negative));
+                                }
                             }
                         }
                     }
+                    BodyElement::Guard(_) | BodyElement::Assign { .. } => {}
                 }
-                BodyElement::Guard(_) | BodyElement::Assign { .. } => {}
             }
         }
     }
 
-    // 3. Find SCCs using Tarjan's algorithm
-    let pred_list: Vec<String> = idb_preds.iter().cloned().collect();
-    let sccs = tarjan_scc(&pred_list, &edges);
+    // 3. Find SCCs using iterative Tarjan's algorithm (avoids stack overflow on deep chains)
+    let sccs = tarjan_scc_iterative(n, &edges);
 
     // 4. Check for negation within SCCs
     //
     // Negative edges to compiler-generated auxiliary predicates (names starting
-    // with `_`) are artifacts of double-negation lowering:
-    //   forall(x | g | b) → not _forall_neg(outer) where _forall_neg :- g, not _neg
-    // The two negations cancel out, so the effective dependency is positive.
-    //
-    // We allow negation cycles where EVERY negative edge within the SCC targets
-    // a synthetic (compiler-generated) predicate. Genuine negation cycles
-    // (e.g., `p :- not q. q :- not p.`) always have negative edges targeting
-    // user-defined predicates and are still rejected.
+    // with `_`) are artifacts of double-negation lowering and are benign.
     for scc in &sccs {
         if scc.len() == 1 {
-            // Check self-negation
-            let pred = &scc[0];
-            if let Some(deps) = edges.get(pred) {
-                for (dep, kind) in deps {
-                    if dep == pred && *kind == EdgeKind::Negative {
-                        return Err(StratificationError::NegationCycle(scc.clone()));
-                    }
+            let pred_idx = scc[0];
+            for &(dep, kind) in &edges[pred_idx] {
+                if dep == pred_idx && kind == EdgeKind::Negative {
+                    return Err(StratificationError::NegationCycle(
+                        scc.iter().map(|&i| pred_names[i].to_string()).collect()
+                    ));
                 }
             }
         } else {
-            // Collect all negative edges within the SCC
-            let scc_set: HashSet<&String> = scc.iter().collect();
+            let scc_set: Vec<bool> = {
+                let mut v = vec![false; n];
+                for &idx in scc { v[idx] = true; }
+                v
+            };
             let mut has_problematic_neg = false;
 
-            for pred in scc {
-                if let Some(deps) = edges.get(pred) {
-                    for (dep, kind) in deps {
-                        if scc_set.contains(dep) && *kind == EdgeKind::Negative {
-                            // A negative edge to a synthetic predicate (starts with '_')
-                            // is benign — it's part of a double-negation lowering pattern.
-                            // A negative edge to a user-defined predicate is problematic.
-                            if !dep.starts_with('_') {
-                                has_problematic_neg = true;
-                                break;
-                            }
+            'outer: for &pred_idx in scc {
+                for &(dep, kind) in &edges[pred_idx] {
+                    if scc_set[dep] && kind == EdgeKind::Negative {
+                        if !pred_names[dep].starts_with('_') {
+                            has_problematic_neg = true;
+                            break 'outer;
                         }
                     }
                 }
-                if has_problematic_neg { break; }
             }
 
             if has_problematic_neg {
-                return Err(StratificationError::NegationCycle(scc.clone()));
+                return Err(StratificationError::NegationCycle(
+                    scc.iter().map(|&i| pred_names[i].to_string()).collect()
+                ));
             }
-            // If all negative edges target synthetic predicates, the cycle is
-            // benign (double-negation artifact). Treat as recursive stratum.
         }
     }
 
-    // 5. Build strata from SCCs (Tarjan outputs leaves-first, which is correct order)
-    let mut strata = Vec::new();
-    for scc in sccs {
-        let pred_set: HashSet<String> = scc.iter().cloned().collect();
+    // 5. Pre-group rules by head predicate for efficient stratum construction
+    let mut rules_by_pred: HashMap<&str, Vec<usize>> = HashMap::new();
+    for (i, rule) in program.rules.iter().enumerate() {
+        rules_by_pred.entry(rule.head.predicate.as_str())
+            .or_default()
+            .push(i);
+    }
 
-        // A stratum is recursive if the SCC has >1 node, or a self-loop
+    // 6. Build strata from SCCs (Tarjan outputs leaves-first = correct eval order)
+    let mut strata = Vec::with_capacity(sccs.len());
+    for scc in sccs {
         let is_recursive = if scc.len() > 1 {
             true
         } else {
-            let pred = &scc[0];
-            edges.get(pred).map_or(false, |deps| {
-                deps.iter().any(|(dep, kind)| dep == pred && *kind == EdgeKind::Positive)
-            })
+            let pred_idx = scc[0];
+            edges[pred_idx].iter().any(|&(dep, kind)| dep == pred_idx && kind == EdgeKind::Positive)
         };
 
-        // Collect all rules whose head is in this SCC
-        let rules: Vec<Rule> = program.rules.iter()
-            .filter(|r| pred_set.contains(&r.head.predicate))
-            .cloned()
+        let pred_set: HashSet<String> = scc.iter()
+            .map(|&i| pred_names[i].to_string())
+            .collect();
+
+        // Collect rules efficiently using pre-grouped index
+        let rules: Vec<Rule> = scc.iter()
+            .flat_map(|&pred_idx| {
+                rules_by_pred.get(pred_names[pred_idx])
+                    .into_iter()
+                    .flat_map(|indices| indices.iter().map(|&i| program.rules[i].clone()))
+            })
             .collect();
 
         strata.push(Stratum {
@@ -178,85 +180,88 @@ pub fn stratify(program: &Program) -> Result<Vec<Stratum>, StratificationError> 
 }
 
 // ============================================================
-// Tarjan's SCC algorithm
+// Iterative Tarjan's SCC algorithm (integer-indexed)
 // ============================================================
 
-struct TarjanState {
-    index_counter: usize,
-    stack: Vec<String>,
-    on_stack: HashSet<String>,
-    index: HashMap<String, usize>,
-    lowlink: HashMap<String, usize>,
-    result: Vec<Vec<String>>,
+/// Frame for the iterative Tarjan DFS.
+struct TarjanFrame {
+    node: usize,
+    edge_idx: usize,  // which neighbor we're processing next
 }
 
-fn tarjan_scc(
-    nodes: &[String],
-    edges: &HashMap<String, Vec<(String, EdgeKind)>>,
-) -> Vec<Vec<String>> {
-    let mut state = TarjanState {
-        index_counter: 0,
-        stack: Vec::new(),
-        on_stack: HashSet::new(),
-        index: HashMap::new(),
-        lowlink: HashMap::new(),
-        result: Vec::new(),
-    };
+fn tarjan_scc_iterative(n: usize, edges: &[Vec<(usize, EdgeKind)>]) -> Vec<Vec<usize>> {
+    const UNVISITED: usize = usize::MAX;
 
-    for node in nodes {
-        if !state.index.contains_key(node) {
-            strongconnect(node, edges, &mut state);
+    let mut index = vec![UNVISITED; n];
+    let mut lowlink = vec![0usize; n];
+    let mut on_stack = vec![false; n];
+    let mut stack: Vec<usize> = Vec::new();
+    let mut counter: usize = 0;
+    let mut result: Vec<Vec<usize>> = Vec::new();
+
+    // DFS call stack (replaces recursion)
+    let mut call_stack: Vec<TarjanFrame> = Vec::new();
+
+    for start in 0..n {
+        if index[start] != UNVISITED {
+            continue;
         }
-    }
 
-    // Tarjan produces SCCs in reverse topological order (leaves first)
-    // which is what we want: evaluate base predicates first
-    state.result
-}
+        // Start DFS from `start`
+        index[start] = counter;
+        lowlink[start] = counter;
+        counter += 1;
+        stack.push(start);
+        on_stack[start] = true;
+        call_stack.push(TarjanFrame { node: start, edge_idx: 0 });
 
-fn strongconnect(
-    v: &str,
-    edges: &HashMap<String, Vec<(String, EdgeKind)>>,
-    state: &mut TarjanState,
-) {
-    state.index.insert(v.to_string(), state.index_counter);
-    state.lowlink.insert(v.to_string(), state.index_counter);
-    state.index_counter += 1;
-    state.stack.push(v.to_string());
-    state.on_stack.insert(v.to_string());
+        while let Some(frame) = call_stack.last_mut() {
+            let v = frame.node;
 
-    if let Some(neighbors) = edges.get(v) {
-        for (w, _kind) in neighbors {
-            if !state.index.contains_key(w.as_str()) {
-                strongconnect(w, edges, state);
-                let w_low = state.lowlink[w.as_str()];
-                let v_low = state.lowlink[v];
-                if w_low < v_low {
-                    state.lowlink.insert(v.to_string(), w_low);
+            if frame.edge_idx < edges[v].len() {
+                let (w, _) = edges[v][frame.edge_idx];
+                frame.edge_idx += 1;
+
+                if index[w] == UNVISITED {
+                    // Push new frame (equivalent to recursive call)
+                    index[w] = counter;
+                    lowlink[w] = counter;
+                    counter += 1;
+                    stack.push(w);
+                    on_stack[w] = true;
+                    call_stack.push(TarjanFrame { node: w, edge_idx: 0 });
+                } else if on_stack[w] {
+                    lowlink[v] = lowlink[v].min(index[w]);
                 }
-            } else if state.on_stack.contains(w.as_str()) {
-                let w_idx = state.index[w.as_str()];
-                let v_low = state.lowlink[v];
-                if w_idx < v_low {
-                    state.lowlink.insert(v.to_string(), w_idx);
+            } else {
+                // All neighbors processed — equivalent to returning from recursive call
+                let v = frame.node;
+                let v_lowlink = lowlink[v];
+
+                // Pop this frame
+                call_stack.pop();
+
+                // Update parent's lowlink
+                if let Some(parent) = call_stack.last() {
+                    lowlink[parent.node] = lowlink[parent.node].min(v_lowlink);
+                }
+
+                // If v is a root node, pop the SCC
+                if v_lowlink == index[v] {
+                    let mut scc = Vec::new();
+                    loop {
+                        let w = stack.pop().unwrap();
+                        on_stack[w] = false;
+                        scc.push(w);
+                        if w == v { break; }
+                    }
+                    result.push(scc);
                 }
             }
         }
     }
 
-    // If v is a root node, pop the SCC
-    if state.lowlink[v] == state.index[v] {
-        let mut scc = Vec::new();
-        loop {
-            let w = state.stack.pop().unwrap();
-            state.on_stack.remove(&w);
-            scc.push(w.clone());
-            if w == v {
-                break;
-            }
-        }
-        state.result.push(scc);
-    }
+    result
 }
 
 #[cfg(test)]

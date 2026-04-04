@@ -7,7 +7,7 @@ use crate::InternedString;
 pub struct EntityId(pub u64);
 
 /// A single value in the database.
-#[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum Value {
     Int(i64),
     Float(OrderedFloat<f64>),

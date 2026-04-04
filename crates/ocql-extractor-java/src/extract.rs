@@ -1,6 +1,13 @@
+use std::collections::HashMap;
+
 use ocql_database::{EntityId, Value};
 use ocql_extractor_common::{Extractor, FactEmitter, LocationEmitter, NodeExt};
 use ocql_extractor_common::tree_sitter::{Language, Node, Tree};
+
+/// Tracks already-extracted type names → entity IDs to avoid duplicates.
+/// When an `extends` or `implements` clause references a type that was already
+/// extracted as a declaration in the same file, we reuse the existing entity ID.
+type TypeMap = HashMap<String, EntityId>;
 
 /// Java extractor using tree-sitter.
 ///
@@ -137,12 +144,13 @@ fn extract_program(
     root: &Node<'_>,
     source: &[u8],
 ) {
+    let mut type_map = TypeMap::new();
     let mut cursor = root.walk();
     if cursor.goto_first_child() {
         loop {
             let node = cursor.node();
             if node.is_named() {
-                extract_top_level(emitter, file_id, &node, source, None);
+                extract_top_level(emitter, file_id, &node, source, None, &mut type_map);
             }
             if !cursor.goto_next_sibling() {
                 break;
@@ -159,6 +167,7 @@ fn extract_top_level(
     node: &Node<'_>,
     source: &[u8],
     enclosing_class: Option<EntityId>,
+    type_map: &mut TypeMap,
 ) {
     match node.kind() {
         "package_declaration" => {
@@ -168,19 +177,19 @@ fn extract_top_level(
             extract_import(emitter, file_id, node, source);
         }
         "class_declaration" => {
-            extract_class(emitter, file_id, node, source, false, enclosing_class);
+            extract_class(emitter, file_id, node, source, false, enclosing_class, type_map);
         }
         "interface_declaration" => {
-            extract_class(emitter, file_id, node, source, true, enclosing_class);
+            extract_class(emitter, file_id, node, source, true, enclosing_class, type_map);
         }
         "enum_declaration" => {
-            extract_enum(emitter, file_id, node, source, enclosing_class);
+            extract_enum(emitter, file_id, node, source, enclosing_class, type_map);
         }
         "record_declaration" => {
-            extract_class(emitter, file_id, node, source, false, enclosing_class);
+            extract_class(emitter, file_id, node, source, false, enclosing_class, type_map);
         }
         "annotation_type_declaration" => {
-            extract_annotation_type(emitter, file_id, node, source, enclosing_class);
+            extract_annotation_type(emitter, file_id, node, source, enclosing_class, type_map);
         }
         "line_comment" | "block_comment" => {
             extract_comment(emitter, file_id, node, source);
@@ -291,6 +300,7 @@ fn extract_class(
     source: &[u8],
     is_interface: bool,
     enclosing_class: Option<EntityId>,
+    type_map: &mut TypeMap,
 ) {
     let name = node.child_by_field("name")
         .map(|n| n.text(source).to_string())
@@ -299,6 +309,9 @@ fn extract_class(
 
     let class_id = emitter.alloc();
     let loc_id = LocationEmitter::emit_for_node(emitter, file_id, node);
+
+    // Register in type_map for deduplication
+    type_map.insert(name.clone(), class_id);
 
     // Use a dummy package for now (0-entity)
     let pkg_id = emitter.alloc();
@@ -340,17 +353,17 @@ fn extract_class(
 
     // Extract superclass
     if let Some(superclass) = node.child_by_field("superclass") {
-        extract_extends(emitter, file_id, class_id, &superclass, source);
+        extract_extends(emitter, file_id, class_id, &superclass, source, type_map);
     }
 
     // Extract interfaces
     if let Some(interfaces) = node.child_by_field("interfaces") {
-        extract_implements(emitter, file_id, class_id, &interfaces, source);
+        extract_implements(emitter, file_id, class_id, &interfaces, source, type_map);
     }
 
     // Also check super_interfaces for interface declarations
     if let Some(super_interfaces) = node.child_by_field("super_interfaces") {
-        extract_implements(emitter, file_id, class_id, &super_interfaces, source);
+        extract_implements(emitter, file_id, class_id, &super_interfaces, source, type_map);
     }
 
     // Extract type parameters
@@ -360,7 +373,7 @@ fn extract_class(
 
     // Extract body
     if let Some(body) = node.child_by_field("body") {
-        extract_class_body(emitter, file_id, class_id, &body, source);
+        extract_class_body(emitter, file_id, class_id, &body, source, type_map);
     }
 }
 
@@ -371,6 +384,7 @@ fn extract_extends(
     class_id: EntityId,
     node: &Node<'_>,
     source: &[u8],
+    type_map: &mut TypeMap,
 ) {
     let mut cursor = node.walk();
     if cursor.goto_first_child() {
@@ -380,15 +394,22 @@ fn extract_extends(
                 || child.kind() == "generic_type"
             {
                 let type_name = extract_type_name(&child, source);
-                let super_id = emitter.alloc();
-                let dummy_pkg = emitter.alloc();
-                let name_val = emitter.string(&type_name);
-                emitter.emit("classes_or_interfaces", vec![
-                    Value::Entity(super_id),
-                    name_val,
-                    Value::Entity(dummy_pkg),
-                    Value::Entity(super_id),
-                ]);
+                // Reuse existing entity if the type was already declared in this file
+                let super_id = if let Some(&existing) = type_map.get(&type_name) {
+                    existing
+                } else {
+                    let id = emitter.alloc();
+                    let dummy_pkg = emitter.alloc();
+                    let name_val = emitter.string(&type_name);
+                    emitter.emit("classes_or_interfaces", vec![
+                        Value::Entity(id),
+                        name_val,
+                        Value::Entity(dummy_pkg),
+                        Value::Entity(id),
+                    ]);
+                    type_map.insert(type_name, id);
+                    id
+                };
                 emitter.emit("extendsReftype", vec![
                     Value::Entity(class_id),
                     Value::Entity(super_id),
@@ -407,6 +428,7 @@ fn extract_implements(
     class_id: EntityId,
     node: &Node<'_>,
     source: &[u8],
+    type_map: &mut TypeMap,
 ) {
     // The node is a `type_list` containing type identifiers
     let mut cursor = node.walk();
@@ -417,18 +439,25 @@ fn extract_implements(
                 || child.kind() == "generic_type"
             {
                 let type_name = extract_type_name(&child, source);
-                let iface_id = emitter.alloc();
-                let dummy_pkg = emitter.alloc();
-                let name_val = emitter.string(&type_name);
-                emitter.emit("classes_or_interfaces", vec![
-                    Value::Entity(iface_id),
-                    name_val,
-                    Value::Entity(dummy_pkg),
-                    Value::Entity(iface_id),
-                ]);
-                emitter.emit("isInterface", vec![
-                    Value::Entity(iface_id),
-                ]);
+                // Reuse existing entity if the type was already declared in this file
+                let iface_id = if let Some(&existing) = type_map.get(&type_name) {
+                    existing
+                } else {
+                    let id = emitter.alloc();
+                    let dummy_pkg = emitter.alloc();
+                    let name_val = emitter.string(&type_name);
+                    emitter.emit("classes_or_interfaces", vec![
+                        Value::Entity(id),
+                        name_val,
+                        Value::Entity(dummy_pkg),
+                        Value::Entity(id),
+                    ]);
+                    emitter.emit("isInterface", vec![
+                        Value::Entity(id),
+                    ]);
+                    type_map.insert(type_name, id);
+                    id
+                };
                 emitter.emit("implInterface", vec![
                     Value::Entity(class_id),
                     Value::Entity(iface_id),
@@ -436,7 +465,7 @@ fn extract_implements(
             }
             // Also check type_list children
             if child.kind() == "type_list" {
-                extract_implements(emitter, _file_id, class_id, &child, source);
+                extract_implements(emitter, _file_id, class_id, &child, source, type_map);
             }
             if !cursor.goto_next_sibling() { break; }
         }
@@ -470,6 +499,7 @@ fn extract_enum(
     node: &Node<'_>,
     source: &[u8],
     enclosing_class: Option<EntityId>,
+    type_map: &mut TypeMap,
 ) {
     let name = node.child_by_field("name")
         .map(|n| n.text(source).to_string())
@@ -477,6 +507,7 @@ fn extract_enum(
     if name.is_empty() { return; }
 
     let class_id = emitter.alloc();
+    type_map.insert(name.clone(), class_id);
     let loc_id = LocationEmitter::emit_for_node(emitter, file_id, node);
 
     let pkg_id = emitter.alloc();
@@ -506,12 +537,12 @@ fn extract_enum(
 
     // Extract interfaces
     if let Some(interfaces) = node.child_by_field("interfaces") {
-        extract_implements(emitter, file_id, class_id, &interfaces, source);
+        extract_implements(emitter, file_id, class_id, &interfaces, source, type_map);
     }
 
     // Extract enum body
     if let Some(body) = node.child_by_field("body") {
-        extract_enum_body(emitter, file_id, class_id, &body, source);
+        extract_enum_body(emitter, file_id, class_id, &body, source, type_map);
     }
 }
 
@@ -522,6 +553,7 @@ fn extract_enum_body(
     class_id: EntityId,
     body: &Node<'_>,
     source: &[u8],
+    type_map: &mut TypeMap,
 ) {
     let mut cursor = body.walk();
     if cursor.goto_first_child() {
@@ -554,7 +586,7 @@ fn extract_enum_body(
                 }
                 "enum_body_declarations" => {
                     // Regular class body inside enum
-                    extract_class_body_children(emitter, file_id, class_id, &child, source);
+                    extract_class_body_children(emitter, file_id, class_id, &child, source, type_map);
                 }
                 _ => {}
             }
@@ -570,6 +602,7 @@ fn extract_annotation_type(
     node: &Node<'_>,
     source: &[u8],
     enclosing_class: Option<EntityId>,
+    type_map: &mut TypeMap,
 ) {
     let name = node.child_by_field("name")
         .map(|n| n.text(source).to_string())
@@ -577,6 +610,7 @@ fn extract_annotation_type(
     if name.is_empty() { return; }
 
     let class_id = emitter.alloc();
+    type_map.insert(name.clone(), class_id);
     let loc_id = LocationEmitter::emit_for_node(emitter, file_id, node);
 
     let pkg_id = emitter.alloc();
@@ -613,8 +647,9 @@ fn extract_class_body(
     class_id: EntityId,
     body: &Node<'_>,
     source: &[u8],
+    type_map: &mut TypeMap,
 ) {
-    extract_class_body_children(emitter, file_id, class_id, body, source);
+    extract_class_body_children(emitter, file_id, class_id, body, source, type_map);
 }
 
 fn extract_class_body_children(
@@ -623,6 +658,7 @@ fn extract_class_body_children(
     class_id: EntityId,
     body: &Node<'_>,
     source: &[u8],
+    type_map: &mut TypeMap,
 ) {
     let mut cursor = body.walk();
     if cursor.goto_first_child() {
@@ -639,19 +675,19 @@ fn extract_class_body_children(
                     extract_constructor(emitter, file_id, class_id, &child, source);
                 }
                 "class_declaration" => {
-                    extract_class(emitter, file_id, &child, source, false, Some(class_id));
+                    extract_class(emitter, file_id, &child, source, false, Some(class_id), type_map);
                 }
                 "interface_declaration" => {
-                    extract_class(emitter, file_id, &child, source, true, Some(class_id));
+                    extract_class(emitter, file_id, &child, source, true, Some(class_id), type_map);
                 }
                 "enum_declaration" => {
-                    extract_enum(emitter, file_id, &child, source, Some(class_id));
+                    extract_enum(emitter, file_id, &child, source, Some(class_id), type_map);
                 }
                 "annotation_type_declaration" => {
-                    extract_annotation_type(emitter, file_id, &child, source, Some(class_id));
+                    extract_annotation_type(emitter, file_id, &child, source, Some(class_id), type_map);
                 }
                 "record_declaration" => {
-                    extract_class(emitter, file_id, &child, source, false, Some(class_id));
+                    extract_class(emitter, file_id, &child, source, false, Some(class_id), type_map);
                 }
                 "line_comment" | "block_comment" => {
                     extract_comment(emitter, file_id, &child, source);
@@ -695,6 +731,10 @@ fn extract_field(
                         name_val,
                         type_val,
                         Value::Entity(class_id),
+                    ]);
+                    emitter.emit("declaresMember", vec![
+                        Value::Entity(class_id),
+                        Value::Entity(field_id),
                     ]);
                     emitter.emit("hasLocation", vec![
                         Value::Entity(field_id),
@@ -742,6 +782,11 @@ fn extract_method(
         type_val,
         Value::Entity(class_id),
         Value::Entity(method_id), // sourceid = self
+    ]);
+
+    emitter.emit("declaresMember", vec![
+        Value::Entity(class_id),
+        Value::Entity(method_id),
     ]);
 
     emitter.emit("hasLocation", vec![
@@ -798,6 +843,11 @@ fn extract_constructor(
         type_val,
         Value::Entity(class_id),
         Value::Entity(constr_id), // sourceid = self
+    ]);
+
+    emitter.emit("declaresMember", vec![
+        Value::Entity(class_id),
+        Value::Entity(constr_id),
     ]);
 
     emitter.emit("hasLocation", vec![
@@ -1115,6 +1165,15 @@ fn extract_stmt(
         "assert_statement" => Some(STMT_ASSERT),
         "local_variable_declaration" => Some(STMT_LOCAL_VAR_DECL),
         "catch_clause" => Some(STMT_CATCH),
+        "explicit_constructor_invocation" => {
+            // super(...) or this(...) in constructor bodies
+            let text = node.text(source);
+            if text.starts_with("super") {
+                Some(20) // superconstructorinvocation
+            } else {
+                Some(19) // constructorinvocation (this)
+            }
+        }
         _ => None,
     };
 
@@ -1167,6 +1226,23 @@ fn extract_stmt(
                         extract_expr(emitter, file_id, &child, source, callable_id, stmt_id, 0);
                     }
                     if !cursor.goto_next_sibling() { break; }
+                }
+            }
+        }
+        "explicit_constructor_invocation" => {
+            // Extract arguments of super(...) or this(...) calls
+            if let Some(args) = node.child_by_field("arguments") {
+                let mut idx = 0i64;
+                let mut cursor = args.walk();
+                if cursor.goto_first_child() {
+                    loop {
+                        let child = cursor.node();
+                        if child.is_named() {
+                            extract_expr(emitter, file_id, &child, source, callable_id, stmt_id, idx);
+                            idx += 1;
+                        }
+                        if !cursor.goto_next_sibling() { break; }
+                    }
                 }
             }
         }
@@ -1423,6 +1499,24 @@ fn extract_expr(
         Value::Entity(expr_id),
         Value::Entity(loc_id),
     ]);
+
+    // Emit namestrings for literals
+    if expr_kind >= EXPR_BOOLEAN_LIT && expr_kind <= EXPR_NULL_LIT {
+        let text = node.text(source);
+        // For string literals, strip surrounding quotes
+        let value = if expr_kind == EXPR_STRING_LIT {
+            text.trim_matches('"').to_string()
+        } else {
+            text.to_string()
+        };
+        let name_val = emitter.string(&text);
+        let value_val = emitter.string(&value);
+        emitter.emit("namestrings", vec![
+            name_val,
+            value_val,
+            Value::Entity(expr_id),
+        ]);
+    }
 
     // Recurse into children
     match node.kind() {

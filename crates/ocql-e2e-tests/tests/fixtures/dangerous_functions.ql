@@ -16,7 +16,7 @@
 //   HIR -> MIR -> engine rules -> evaluate
 //
 // It finds calls to dangerous C functions by examining the expression tree:
-//   call_expression (kind=97, @routineexpr) has child 0 = callee identifier with valuetext
+//   call_expression (kind=74, @callexpr) has child 0 = callee identifier with valuetext
 
 predicate isDangerousName(string name) {
     name = "gets" or
@@ -25,9 +25,9 @@ predicate isDangerousName(string name) {
     name = "strcat"
 }
 
-// A call expression (kind 97) whose callee (child index 0) has a dangerous name
+// A call expression (kind 74) whose callee (child index 0) has a dangerous name
 predicate dangerousCall(int call_id, string callee_name) {
-    exprs(call_id, 97, _) and
+    exprs(call_id, 74, _) and
     exprparents(callee_id, 0, call_id) and
     valuetext(callee_id, callee_name) and
     isDangerousName(callee_name)

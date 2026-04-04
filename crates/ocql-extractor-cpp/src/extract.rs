@@ -102,9 +102,9 @@ const EXPR_LOGAND: i64 = 65;
 const EXPR_LOGOR: i64 = 66;
 const EXPR_COMMA: i64 = 67;
 const EXPR_SUBSCRIPT: i64 = 68;
-#[allow(dead_code)]
 const EXPR_CALL: i64 = 74;
 const EXPR_VARACCESS: i64 = 84;
+#[allow(dead_code)]
 const EXPR_ROUTINEEXPR: i64 = 97;
 const EXPR_SIZEOF: i64 = 93;
 const EXPR_LITERAL: i64 = 140;
@@ -143,17 +143,17 @@ impl Extractor for CppExtractor {
 
 /// Post-extraction pass: resolve call bindings (funbind table).
 ///
-/// For each call expression (kind 97 / @routineexpr), find the callee identifier
+/// For each call expression (kind 74 / @callexpr), find the callee identifier
 /// (child at index 0 in exprparents), look up its name from valuetext, and resolve
 /// it to a function entity from the functions table. Emits funbind(call_id, func_id).
 fn resolve_call_bindings(emitter: &mut FactEmitter<'_>) {
     use std::collections::{HashMap, HashSet};
 
-    // Step 1: Find all kind-97 (routineexpr) expression entity IDs
+    // Step 1: Find all kind-74 (callexpr) expression entity IDs
     let call_ids: HashSet<EntityId> = emitter.db.scan("exprs")
         .into_iter()
         .flatten()
-        .filter(|t| t[1] == Value::Int(EXPR_ROUTINEEXPR))
+        .filter(|t| t[1] == Value::Int(EXPR_CALL))
         .filter_map(|t| match t[0] { Value::Entity(id) => Some(id), _ => None })
         .collect();
 
@@ -1660,7 +1660,7 @@ fn extract_expr(
         "number_literal" | "string_literal" | "char_literal" | "true" | "false" | "null"
         | "string_content" | "concatenated_string" => Some(EXPR_LITERAL),
         "identifier" => Some(EXPR_VARACCESS),
-        "call_expression" => Some(EXPR_ROUTINEEXPR),
+        "call_expression" => Some(EXPR_CALL),
         "parenthesized_expression" => Some(EXPR_PAREXPR),
         "conditional_expression" => Some(EXPR_CONDITIONAL),
         "subscript_expression" => Some(EXPR_SUBSCRIPT),
@@ -2203,8 +2203,8 @@ mod tests {
         let exprs: Vec<_> = db.scan("exprs").unwrap().collect();
         let kinds: Vec<i64> = exprs.iter().map(|t| t[1].as_int().unwrap()).collect();
         eprintln!("Expression kinds: {:?}", kinds);
-        // Should have call expressions (kind 97, @routineexpr)
-        assert!(kinds.contains(&EXPR_ROUTINEEXPR), "Should have call expressions");
+        // Should have call expressions (kind 74, @callexpr)
+        assert!(kinds.contains(&EXPR_CALL), "Should have call expressions");
         // Should have variable accesses (kind 84)
         assert!(kinds.contains(&EXPR_VARACCESS), "Should have variable accesses");
         // Should have addition (kind 25)

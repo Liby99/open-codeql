@@ -144,6 +144,20 @@ class Method extends Callable, @method {
   /** Gets the source declaration of this method. */
   override Method getSourceDeclaration() { methods(this, _, _, _, _, result) }
 
+  /**
+   * Holds if this method is abstract, either explicitly or implicitly.
+   * JLS 9.4: An interface method lacking a `private`, `default`, or `static`
+   * modifier is implicitly abstract.
+   */
+  override predicate isAbstract() {
+    this.hasModifier("abstract")
+    or
+    this.getDeclaringType() instanceof Interface and
+    not this.isPrivate() and
+    not this.isDefault() and
+    not this.isStatic()
+  }
+
   /** Holds if this method overrides `m`. */
   predicate overrides(Method m) {
     exists(RefType t | t = this.getDeclaringType() |

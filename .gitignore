@@ -23,3 +23,6 @@ Thumbs.db
 .env
 .env.*
 output/
+
+# CodeQL CLI binary
+vendor/codeql-cli-*/

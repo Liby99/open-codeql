@@ -743,7 +743,7 @@ fn c_security_dangerous_call_detection() {
         }
 
         predicate dangerousCall(int call_id, string callee_name) {
-            exprs(call_id, 97, _) and
+            exprs(call_id, 74, _) and
             exprparents(callee_id, 0, call_id) and
             valuetext(callee_id, callee_name) and
             isDangerousName(callee_name)

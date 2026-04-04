@@ -2,7 +2,8 @@ use ocql_schema::{parse_dbscheme, DbScheme};
 
 /// A .dbscheme for Java extraction, modeled after semmlecode.dbscheme.
 ///
-/// This is a growing subset of the full CodeQL Java schema.
+/// This matches the oqlpack/java/lib/config/semmlecode.dbscheme union types
+/// to enable proper #char seeding for the QL library.
 pub fn java_schema() -> DbScheme {
     parse_dbscheme(JAVA_DBSCHEME).expect("built-in Java schema should parse")
 }
@@ -22,6 +23,15 @@ folders(
 
 @container = @file | @folder
 
+containerparent(
+    int parent: @container ref,
+    unique int child: @container ref
+);
+
+sourceLocationPrefix(
+    string prefix: string ref
+);
+
 locations_default(
     unique int id: @location_default,
     int file: @file ref,
@@ -31,9 +41,20 @@ locations_default(
     int endColumn: int ref
 );
 
+@location = @location_default
+
 hasLocation(
     int locatableid: @locatable ref,
-    int id: @location_default ref
+    int id: @location ref
+);
+
+@sourceline = @locatable
+
+numlines(
+    int element_id: @sourceline ref,
+    int num_lines: int ref,
+    int num_code: int ref,
+    int num_comment: int ref
 );
 
 /* ========== Packages ========== */
@@ -78,6 +99,10 @@ isAnnotType(
     int interfaceid: @classorinterface ref
 );
 
+isEnumConst(
+    int fieldid: @field ref
+);
+
 extendsReftype(
     int id1: @reftype ref,
     int id2: @classorinterface ref
@@ -102,10 +127,6 @@ fields(
     int parentid: @classorinterface ref
 );
 
-isEnumConst(
-    int fieldid: @field ref
-);
-
 /* ========== Methods and constructors ========== */
 
 methods(
@@ -128,6 +149,10 @@ constrs(
 
 @callable = @method | @constructor
 
+isDefConstr(
+    unique int id: @constructor ref
+);
+
 /* ========== Parameters ========== */
 
 #keyset[parentid,pos]
@@ -142,6 +167,10 @@ params(
 paramName(
     unique int id: @param ref,
     string nodeName: string ref
+);
+
+isVarargsParam(
+    int param: @param ref
 );
 
 /* ========== Local variables ========== */
@@ -180,7 +209,7 @@ imports(
 stmts(
     unique int id: @stmt,
     int kind: int ref,
-    int parent: @element ref,
+    int parent: @stmtparent ref,
     int idx: int ref,
     int bodydecl: @callable ref
 );
@@ -192,13 +221,23 @@ exprs(
     unique int id: @expr,
     int kind: int ref,
     string typeName: string ref,
-    int parent: @element ref,
+    int parent: @exprparent ref,
     int idx: int ref
 );
 
 callableEnclosingExpr(
     unique int id: @expr ref,
     int callable_id: @callable ref
+);
+
+callableBinding(
+    unique int id: @expr ref,
+    int callable_id: @callable ref
+);
+
+variableBinding(
+    unique int id: @expr ref,
+    int variable_id: @variable ref
 );
 
 /* ========== Annotations ========== */
@@ -232,12 +271,47 @@ typeVars(
     int parentid: @element ref
 );
 
+wildcards(
+    unique int id: @wildcard,
+    string nodeName: string ref,
+    int kind: int ref
+);
+
 #keyset[parentid,pos]
 typeBounds(
     unique int id: @typebound,
     string typeName: string ref,
     int pos: int ref,
     int parentid: @typevariable ref
+);
+
+#keyset[pos,parentid]
+typeArgs(
+    int argumentid: @reftype ref,
+    int pos: int ref,
+    int parentid: @element ref
+);
+
+arrays(
+    unique int id: @array,
+    string nodeName: string ref,
+    int elementtypeid: @type ref,
+    int dimension: int ref,
+    int componenttypeid: @type ref
+);
+
+/* ========== Compiler-generated ========== */
+
+compiler_generated(
+    unique int id: @element ref,
+    int kind: int ref
+);
+
+/* ========== Declared members ========== */
+
+declaresMember(
+    int parentid: @reftype ref,
+    int memberid: @member ref
 );
 
 /* ========== Literal values ========== */
@@ -251,21 +325,29 @@ namestrings(
 /* ========== Union types ========== */
 
 @boundedtype = @typevariable | @wildcard
-
-@reftype = @classorinterface | @boundedtype
-
+@reftype = @classorinterface | @array | @boundedtype
+@classorarray = @classorinterface | @array
 @type = @primitive | @reftype
 
 @variable = @localvar | @field
+@localscopevariable = @localvar | @param
 
-@modifiable = @classorinterface | @method | @constructor | @field | @param | @localvar
+@member = @method | @constructor | @field | @reftype
+@modifiable = @classorinterface | @method | @constructor | @field | @param | @localvar | @typevariable
+@classorinterfaceorcallable = @classorinterface | @callable
+@classorinterfaceorpackage = @classorinterface | @package
 
-@element = @package | @modifier | @annotation | @classorinterface
-         | @method | @constructor | @field | @param | @localvar
+@stmtparent = @callable | @stmt | @expr
+@exprparent = @stmt | @expr | @callable | @field | @classorinterface | @param | @localvar | @typevariable
+
+@element = @package | @modifier | @annotation
+         | @classorinterface | @method | @constructor | @field | @param | @localvar
          | @typevariable | @stmt | @expr | @import | @javadoc | @comment
-         | @primitive
+         | @primitive | @array
 
-@locatable = @element | @typebound | @file
+@locatable = @element | @typebound | @file | @folder
+
+@top = @element | @locatable | @folder
 
 @wildcard = @typevariable
 "#;
@@ -280,5 +362,12 @@ mod tests {
         let table_count = schema.tables().count();
         eprintln!("Java schema has {} tables", table_count);
         assert!(table_count >= 25, "Should have >= 25 tables, got {}", table_count);
+
+        // Verify key union types exist
+        let union_names: Vec<_> = schema.unions().map(|u| u.name.clone()).collect();
+        assert!(union_names.contains(&"@top".to_string()), "Missing @top union");
+        assert!(union_names.contains(&"@member".to_string()), "Missing @member union");
+        assert!(union_names.contains(&"@stmtparent".to_string()), "Missing @stmtparent union");
+        assert!(union_names.contains(&"@exprparent".to_string()), "Missing @exprparent union");
     }
 }

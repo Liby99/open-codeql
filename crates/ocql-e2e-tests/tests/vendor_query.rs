@@ -18,7 +18,7 @@ use ocql_extractor_cpp::{CppExtractor, cpp_schema};
 ///   vendor/codeql/cpp/ql/src/Security/CWE/CWE-676/DangerousFunctionOverflow.ql
 ///
 /// It uses: FunctionCall, getTarget(), hasGlobalOrStdName("gets"), getNumberOfParameters()
-/// These require: @routineexpr (kind 97), iscall, funbind tables from our extractor.
+/// These require: @callexpr (kind 74), iscall, funbind tables from our extractor.
 #[test]
 fn vendor_dangerous_function_overflow() {
     let builder = std::thread::Builder::new().stack_size(128 * 1024 * 1024);

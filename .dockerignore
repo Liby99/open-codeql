@@ -1,0 +1,31 @@
+# Build artifacts (8GB+)
+target/
+
+# macOS CodeQL CLI (not usable in Linux container)
+vendor/codeql-cli-2*/
+
+# Linux CodeQL zip (already COPY'd and unpacked separately in Dockerfile)
+vendor/codeql-linux64.zip
+
+# IDE / OS
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+
+# Output
+output/
+
+# Environment
+.env
+.env.*
+
+# Docker context doesn't need crawled docs
+docs/crawled/
+
+# Git internals of submodules
+vendor/test-repos/*/.git
+vendor/codeql/.git

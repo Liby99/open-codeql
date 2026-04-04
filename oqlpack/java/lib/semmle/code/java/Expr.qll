@@ -1,5 +1,13 @@
 /**
  * Provides classes and predicates for working with Java expressions.
+ *
+ * Expression kind values match the vendor dbscheme case @expr.kind:
+ *   1=arrayaccess, 2=arraycreation, 3=arrayinit, 4=assign, 5-15=compound assign,
+ *   16=boolean_lit, 17=int_lit, 18=long_lit, 19=float_lit, 20=double_lit,
+ *   21=char_lit, 22=string_lit, 23=null_lit, 24-28=arith, 29-31=shift,
+ *   32-34=bitwise, 35-36=logical, 37-42=comparison, 43-50=unary,
+ *   51=cast, 52=new, 53=conditional, 55=instanceof, 56=localvardecl,
+ *   58=this, 59=super, 60=varaccess, 61=methodaccess, 62=typeaccess, 68=lambda
  */
 
 import Element
@@ -121,7 +129,7 @@ class FieldWrite extends FieldAccess, VarWrite { }
 
 /** An assignment expression. */
 class AssignExpr extends Expr {
-  AssignExpr() { this.getKind() = 22 }
+  AssignExpr() { this.getKind() = 4 }
 
   /** Gets the destination of the assignment (left-hand side). */
   Expr getDest() { result = this.getChildExpr(0) }
@@ -135,7 +143,7 @@ class AssignExpr extends Expr {
 /** A literal expression. */
 class Literal extends Expr {
   Literal() {
-    this.getKind() >= 29 and this.getKind() <= 36
+    this.getKind() >= 16 and this.getKind() <= 23
   }
 
   /** Gets the literal value as a string. */
@@ -146,42 +154,42 @@ class Literal extends Expr {
 
 /** A string literal. */
 class StringLiteral extends Literal {
-  StringLiteral() { this.getKind() = 29 }
+  StringLiteral() { this.getKind() = 22 }
 
   override string getAPrimaryQlClass() { result = "StringLiteral" }
 }
 
 /** An integer literal. */
 class IntegerLiteral extends Literal {
-  IntegerLiteral() { this.getKind() = 30 }
+  IntegerLiteral() { this.getKind() = 17 }
 
   override string getAPrimaryQlClass() { result = "IntegerLiteral" }
 }
 
 /** A `this` expression. */
 class ThisAccess extends Expr {
-  ThisAccess() { this.getKind() = 20 }
+  ThisAccess() { this.getKind() = 58 }
 
   override string getAPrimaryQlClass() { result = "ThisAccess" }
 }
 
 /** A `super` expression. */
 class SuperAccess extends Expr {
-  SuperAccess() { this.getKind() = 21 }
+  SuperAccess() { this.getKind() = 59 }
 
   override string getAPrimaryQlClass() { result = "SuperAccess" }
 }
 
 /** A type access expression. */
 class TypeAccess extends Expr {
-  TypeAccess() { this.getKind() = 14 }
+  TypeAccess() { this.getKind() = 62 }
 
   override string getAPrimaryQlClass() { result = "TypeAccess" }
 }
 
 /** A local variable declaration expression. */
 class LocalVariableDeclExpr extends Expr {
-  LocalVariableDeclExpr() { this.getKind() = 42 }
+  LocalVariableDeclExpr() { this.getKind() = 56 }
 
   /** Gets the local variable. */
   LocalVariableDecl getVariable() { localvars(result, _, _, this) }
@@ -197,7 +205,7 @@ class LocalVariableDeclExpr extends Expr {
 
 /** A cast expression. */
 class CastExpr extends Expr {
-  CastExpr() { this.getKind() = 16 }
+  CastExpr() { this.getKind() = 51 }
 
   /** Gets the expression being cast. */
   Expr getExpr() { result = this.getChildExpr(0) }
@@ -210,14 +218,14 @@ class CastExpr extends Expr {
 
 /** An `instanceof` expression. */
 class InstanceOfExpr extends Expr {
-  InstanceOfExpr() { this.getKind() = 17 }
+  InstanceOfExpr() { this.getKind() = 55 }
 
   override string getAPrimaryQlClass() { result = "InstanceOfExpr" }
 }
 
 /** A conditional expression (`? :`). */
 class ConditionalExpr extends Expr {
-  ConditionalExpr() { this.getKind() = 24 }
+  ConditionalExpr() { this.getKind() = 53 }
 
   /** Gets the condition. */
   Expr getCondition() { result = this.getChildExpr(0) }
@@ -229,11 +237,4 @@ class ConditionalExpr extends Expr {
   Expr getFalseExpr() { result = this.getChildExpr(2) }
 
   override string getAPrimaryQlClass() { result = "ConditionalExpr" }
-}
-
-/** A return expression (used inside lambdas). */
-class ReturnExpr extends Expr {
-  ReturnExpr() { this.getKind() = 46 }
-
-  override string getAPrimaryQlClass() { result = "ReturnExpr" }
 }

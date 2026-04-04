@@ -42,7 +42,7 @@ impl Hash for TupleKey {
 /// An index on one or more columns for fast lookup.
 struct Index {
     /// Which columns are indexed (by position).
-    columns: Vec<usize>,
+    columns: SmallVec<[usize; 4]>,
     /// Map from indexed column values → set of matching tuple indices.
     data: HashMap<SmallVec<[Value; 4]>, Vec<usize>>,
 }
@@ -85,7 +85,7 @@ impl Relation {
         for index in self.indexes.get_mut().iter_mut() {
             let max_col = index.columns.iter().copied().max().unwrap_or(0);
             if tuple.len() <= max_col {
-                continue; // skip indexes on columns wider than this tuple
+                continue;
             }
             let key: SmallVec<[Value; 4]> = index.columns.iter().map(|&c| tuple[c].clone()).collect();
             index.data.entry(key).or_default().push(idx);
@@ -112,13 +112,18 @@ impl Relation {
     ///
     /// For each matching tuple, calls `f(tuple)`. This closure-based API
     /// avoids lifetime issues with the RefCell borrow.
+    /// Look up tuples matching a key on the given columns.
+    /// Lazily builds the index if needed (interior mutability via RefCell).
+    ///
+    /// For each matching tuple, calls `f(tuple)`. This closure-based API
+    /// avoids lifetime issues with the RefCell borrow.
     pub fn lookup_each<F>(&self, columns: &[usize], key: &[Value], mut f: F)
     where
         F: FnMut(&Tuple),
     {
         self.ensure_index(columns);
         let indexes = self.indexes.borrow();
-        let idx = indexes.iter().find(|i| i.columns == columns).unwrap();
+        let idx = indexes.iter().find(|i| i.columns.as_slice() == columns).unwrap();
         let search_key: SmallVec<[Value; 4]> = key.iter().cloned().collect();
         if let Some(tuple_indices) = idx.data.get(&search_key) {
             for &ti in tuple_indices {
@@ -132,7 +137,7 @@ impl Relation {
     pub fn lookup_any(&self, columns: &[usize], key: &[Value]) -> bool {
         self.ensure_index(columns);
         let indexes = self.indexes.borrow();
-        let idx = indexes.iter().find(|i| i.columns == columns).unwrap();
+        let idx = indexes.iter().find(|i| i.columns.as_slice() == columns).unwrap();
         let search_key: SmallVec<[Value; 4]> = key.iter().cloned().collect();
         idx.data.contains_key(&search_key)
     }
@@ -142,7 +147,7 @@ impl Relation {
         // Fast path: check if index already exists
         {
             let indexes = self.indexes.borrow();
-            if indexes.iter().any(|i| i.columns == columns) {
+            if indexes.iter().any(|i| i.columns.as_slice() == columns) {
                 return;
             }
         }
@@ -152,14 +157,14 @@ impl Relation {
         let mut data: HashMap<SmallVec<[Value; 4]>, Vec<usize>> = HashMap::new();
         for (i, tuple) in self.tuples.iter().enumerate() {
             if tuple.len() <= max_col {
-                continue; // skip tuples that are too short for this index
+                continue;
             }
             let key: SmallVec<[Value; 4]> = columns.iter().map(|&c| tuple[c].clone()).collect();
             data.entry(key).or_default().push(i);
         }
 
         self.indexes.borrow_mut().push(Index {
-            columns: columns.to_vec(),
+            columns: columns.iter().copied().collect(),
             data,
         });
     }
