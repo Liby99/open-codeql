@@ -100,11 +100,20 @@ fn run_query(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
     let elapsed = start.elapsed();
     eprintln!("Done in {:.3}s", elapsed.as_secs_f64());
 
-    // Find select_result relation(s)
-    let select_rels: Vec<String> = db.relation_names()
-        .filter(|n| n.starts_with("select_result"))
+    // Prefer select_output (projected columns only) over select_result (all columns)
+    let output_rels: Vec<String> = db.relation_names()
+        .filter(|n| n.starts_with("select_output"))
         .map(|s| s.to_string())
         .collect();
+
+    let select_rels: Vec<String> = if !output_rels.is_empty() {
+        output_rels
+    } else {
+        db.relation_names()
+            .filter(|n| n.starts_with("select_result"))
+            .map(|s| s.to_string())
+            .collect()
+    };
 
     if select_rels.is_empty() {
         // Show all new predicates from the query

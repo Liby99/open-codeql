@@ -45,6 +45,7 @@ use ocql_schema::ColumnType;
 
 const MAGIC: &[u8; 4] = b"OCQL";
 const VERSION: u32 = 1;
+const SCHEMA_MARKER: u32 = 0x5343_484D; // "SCHM" in hex
 
 // Value tags
 const TAG_INT: u8 = 0;
@@ -191,6 +192,40 @@ pub fn save_database(db: &Database, w: &mut dyn Write) -> Result<(), SerializeEr
         }
     }
 
+    // Schema section: entity-type mappings and union types
+    // This provides the info needed for seed_db_type_chars.
+    write_u32(w, SCHEMA_MARKER)?;
+
+    // Entity tables: (table_name, entity_name) for tables with `unique int id: @entity`
+    let entity_tables: Vec<_> = db.schema.tables()
+        .filter_map(|t| {
+            t.columns.first().and_then(|col| {
+                if col.is_unique {
+                    if let ocql_schema::DbType::Entity(ref name) = col.db_type {
+                        return Some((t.name.as_str(), name.as_str()));
+                    }
+                }
+                None
+            })
+        })
+        .collect();
+    write_u32(w, entity_tables.len() as u32)?;
+    for (table_name, entity_name) in &entity_tables {
+        write_str(w, table_name)?;
+        write_str(w, entity_name)?;
+    }
+
+    // Union types: (union_name, [variant_names])
+    let unions: Vec<_> = db.schema.unions().collect();
+    write_u32(w, unions.len() as u32)?;
+    for u in &unions {
+        write_str(w, &u.name)?;
+        write_u32(w, u.variants.len() as u32)?;
+        for v in &u.variants {
+            write_str(w, v)?;
+        }
+    }
+
     Ok(())
 }
 
@@ -316,6 +351,50 @@ pub fn load_database(r: &mut dyn Read) -> Result<Database, SerializeError> {
                 tuple.push(read_value(r)?);
             }
             db.insert(&name, tuple).unwrap();
+        }
+    }
+
+    // Try to read the schema section (may not exist in older databases)
+    if let Ok(marker) = read_u32(r) {
+        if marker == SCHEMA_MARKER {
+            use ocql_schema::{Entry, Table, Column, DbType, UnionType};
+
+            let mut entries = Vec::new();
+
+            // Entity tables
+            let num_entity_tables = read_u32(r)?;
+            for _ in 0..num_entity_tables {
+                let table_name = read_string(r)?;
+                let entity_name = read_string(r)?;
+                entries.push(Entry::Table(Table {
+                    name: table_name.clone(),
+                    columns: vec![Column {
+                        name: "id".to_string(),
+                        col_type: ColumnType::Int,
+                        db_type: DbType::Entity(entity_name),
+                        is_unique: true,
+                        is_ref: false,
+                    }],
+                    keysets: Vec::new(),
+                }));
+            }
+
+            // Union types
+            let num_unions = read_u32(r)?;
+            for _ in 0..num_unions {
+                let union_name = read_string(r)?;
+                let num_variants = read_u32(r)?;
+                let mut variants = Vec::with_capacity(num_variants as usize);
+                for _ in 0..num_variants {
+                    variants.push(read_string(r)?);
+                }
+                entries.push(Entry::Union(UnionType {
+                    name: union_name,
+                    variants,
+                }));
+            }
+
+            db.schema = DbScheme { entries };
         }
     }
 

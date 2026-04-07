@@ -86,6 +86,29 @@ fn create(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
     eprintln!("Extracted {} files ({} ok, {} failed) in {:.2}s",
         results.len(), success_count, fail_count, start.elapsed().as_secs_f64());
 
+    // For Java, also extract JDK bytecode
+    if language == "java" {
+        if let Some(java_home) = ocql_extractor_java::jdk::find_java_home() {
+            eprintln!("Extracting JDK bytecode from: {}", java_home.display());
+            let jdk_start = Instant::now();
+            match ocql_extractor_java::jdk::extract_jdk(&mut db, &java_home) {
+                Ok(count) => {
+                    eprintln!("Extracted {} JDK classes in {:.2}s",
+                        count, jdk_start.elapsed().as_secs_f64());
+                }
+                Err(e) => {
+                    eprintln!("Warning: JDK extraction failed: {}", e);
+                }
+            }
+        } else {
+            eprintln!("Warning: JAVA_HOME not found, skipping JDK bytecode extraction");
+        }
+
+        // Re-resolve call/variable bindings now that JDK methods are available
+        eprintln!("Resolving call bindings (with JDK)...");
+        ocql_extractor_java::resolve_bindings(&mut db);
+    }
+
     for r in &results {
         if !r.success {
             if let Some(ref err) = r.error {

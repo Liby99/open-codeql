@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-use ocql_database::{EntityId, Value};
+use ocql_database::{Database, EntityId, Value};
 use ocql_extractor_common::{Extractor, FactEmitter, LocationEmitter, NodeExt};
 use ocql_extractor_common::tree_sitter::{Language, Node, Tree};
 
@@ -46,6 +46,7 @@ const STMT_EXPR: i64 = 14;
 const STMT_LABELED: i64 = 15;
 const STMT_ASSERT: i64 = 16;
 const STMT_LOCAL_VAR_DECL: i64 = 17;
+const STMT_CASE: i64 = 21;
 const STMT_CATCH: i64 = 22;
 
 // Expression kind constants (matches CodeQL Java semmlecode.dbscheme)
@@ -109,6 +110,9 @@ const EXPR_ARRAY_ACCESS: i64 = 1;
 const EXPR_ARRAY_CREATION: i64 = 2;
 const EXPR_ARRAY_INIT: i64 = 3;
 const EXPR_LAMBDA: i64 = 68;
+const EXPR_TYPEACCESS: i64 = 62;
+const EXPR_ARRAYTYPEACCESS: i64 = 63;
+const EXPR_DECLANNOTATION: i64 = 66;
 
 // Import kind constants
 const IMPORT_SINGLE: i64 = 1;
@@ -134,6 +138,228 @@ impl Extractor for JavaExtractor {
     ) {
         let root = tree.root_node();
         extract_program(emitter, file_id, &root, source);
+        resolve_call_bindings(emitter);
+        resolve_variable_bindings(emitter);
+    }
+}
+
+/// Public entry point: resolve all call and variable bindings on a database.
+/// Call this after JDK bytecode extraction to bind source-level calls to JDK methods.
+pub fn resolve_bindings(db: &mut Database) {
+    let mut emitter = FactEmitter::new(db);
+    resolve_call_bindings(&mut emitter);
+    resolve_variable_bindings(&mut emitter);
+}
+
+/// Post-extraction pass: resolve method/constructor calls to their declarations.
+///
+/// For each method invocation (EXPR_METHODACCESS=61), finds the method name from
+/// namestrings, looks up matching methods by name, and emits callableBinding rows.
+/// For each object creation (EXPR_NEW=52), matches against constructors by type name.
+fn resolve_call_bindings(emitter: &mut FactEmitter<'_>) {
+    use std::collections::{HashMap, HashSet};
+
+    // Step 0: Collect already-bound expression IDs to avoid duplicates
+    let mut already_bound: HashSet<EntityId> = HashSet::new();
+    if let Some(rows) = emitter.db.scan("callableBinding") {
+        for t in rows {
+            if let Value::Entity(id) = &t[0] {
+                already_bound.insert(*id);
+            }
+        }
+    }
+
+    // Step 1: Find all method call (kind 61) and new (kind 52) expressions
+    let mut method_calls: Vec<EntityId> = Vec::new();
+    let mut new_exprs: Vec<EntityId> = Vec::new();
+    if let Some(rows) = emitter.db.scan("exprs") {
+        for t in rows {
+            if let (Value::Entity(id), Value::Int(kind)) = (&t[0], &t[1]) {
+                if already_bound.contains(id) {
+                    continue;
+                }
+                if *kind == EXPR_METHODACCESS {
+                    method_calls.push(*id);
+                } else if *kind == EXPR_NEW {
+                    new_exprs.push(*id);
+                }
+            }
+        }
+    }
+
+    if method_calls.is_empty() && new_exprs.is_empty() {
+        return;
+    }
+
+    // Step 2: Build expr_id → name map from namestrings
+    let mut expr_name_map: HashMap<EntityId, String> = HashMap::new();
+    if let Some(rows) = emitter.db.scan("namestrings") {
+        for t in rows {
+            if let (Value::String(name_sid), Value::Entity(eid)) = (&t[1], &t[2]) {
+                let name = emitter.db.strings.resolve(*name_sid).to_string();
+                expr_name_map.insert(*eid, name);
+            }
+        }
+    }
+
+    // Step 3: Build method name → method entity ID map (may have multiple with same name)
+    let mut method_map: HashMap<String, Vec<EntityId>> = HashMap::new();
+    if let Some(rows) = emitter.db.scan("methods") {
+        for t in rows {
+            if let (Value::Entity(id), Value::String(name_sid)) = (&t[0], &t[1]) {
+                let name = emitter.db.strings.resolve(*name_sid).to_string();
+                method_map.entry(name).or_default().push(*id);
+            }
+        }
+    }
+
+    // Step 4: Build type name → constructor entity ID map
+    let mut constr_map: HashMap<String, Vec<EntityId>> = HashMap::new();
+    if let Some(rows) = emitter.db.scan("constrs") {
+        for t in rows {
+            if let (Value::Entity(id), Value::String(name_sid)) = (&t[0], &t[1]) {
+                let name = emitter.db.strings.resolve(*name_sid).to_string();
+                constr_map.entry(name).or_default().push(*id);
+            }
+        }
+    }
+
+    // Step 5: Resolve method calls → callableBinding
+    let mut bindings: Vec<(EntityId, EntityId)> = Vec::new();
+    for call_id in &method_calls {
+        if let Some(method_name) = expr_name_map.get(call_id) {
+            if let Some(targets) = method_map.get(method_name) {
+                // Bind to the first matching method (simple name resolution)
+                bindings.push((*call_id, targets[0]));
+            }
+        }
+    }
+
+    // Step 6: Resolve new expressions → callableBinding
+    for new_id in &new_exprs {
+        if let Some(type_name) = expr_name_map.get(new_id) {
+            if let Some(targets) = constr_map.get(type_name) {
+                bindings.push((*new_id, targets[0]));
+            }
+        }
+    }
+
+    // Step 7: Emit callableBinding rows
+    for (expr_id, callable_id) in bindings {
+        emitter.emit("callableBinding", vec![
+            Value::Entity(expr_id),
+            Value::Entity(callable_id),
+        ]);
+    }
+}
+
+/// Post-extraction pass: resolve variable accesses to their declarations.
+///
+/// For each variable access (EXPR_VARACCESS=60), finds the variable name from
+/// namestrings, looks up matching variables (local vars, params, fields) by name,
+/// and emits variableBinding rows.
+fn resolve_variable_bindings(emitter: &mut FactEmitter<'_>) {
+    use std::collections::{HashMap, HashSet};
+
+    // Step 0: Collect already-bound expression IDs to avoid duplicates
+    let mut already_bound: HashSet<EntityId> = HashSet::new();
+    if let Some(rows) = emitter.db.scan("variableBinding") {
+        for t in rows {
+            if let Value::Entity(id) = &t[0] {
+                already_bound.insert(*id);
+            }
+        }
+    }
+
+    // Step 1: Find all variable access (kind 60) expressions
+    let mut var_accesses: Vec<EntityId> = Vec::new();
+    if let Some(rows) = emitter.db.scan("exprs") {
+        for t in rows {
+            if let (Value::Entity(id), Value::Int(kind)) = (&t[0], &t[1]) {
+                if *kind == EXPR_VARACCESS && !already_bound.contains(id) {
+                    var_accesses.push(*id);
+                }
+            }
+        }
+    }
+
+    if var_accesses.is_empty() {
+        return;
+    }
+
+    // Step 2: Build expr_id → name map from namestrings
+    let mut expr_name_map: HashMap<EntityId, String> = HashMap::new();
+    if let Some(rows) = emitter.db.scan("namestrings") {
+        for t in rows {
+            if let (Value::String(name_sid), Value::Entity(eid)) = (&t[1], &t[2]) {
+                let name = emitter.db.strings.resolve(*name_sid).to_string();
+                expr_name_map.insert(*eid, name);
+            }
+        }
+    }
+
+    // Step 3: Build variable name → entity ID maps
+    // Priority: local vars > params > fields (innermost scope wins)
+    let mut var_map: HashMap<String, EntityId> = HashMap::new();
+
+    // Fields (lowest priority — inserted first, overwritten by locals/params)
+    if let Some(rows) = emitter.db.scan("fields") {
+        for t in rows {
+            if let (Value::Entity(id), Value::String(name_sid)) = (&t[0], &t[1]) {
+                let name = emitter.db.strings.resolve(*name_sid).to_string();
+                var_map.insert(name, *id);
+            }
+        }
+    }
+
+    // Parameters
+    if let Some(rows) = emitter.db.scan("params") {
+        for t in rows {
+            if let Value::Entity(id) = &t[0] {
+                // paramName has the actual name
+                let param_id = *id;
+                // Look up name from paramName table
+                if let Some(pname_rows) = emitter.db.scan("paramName") {
+                    for pn in pname_rows {
+                        if let (Value::Entity(pid), Value::String(name_sid)) = (&pn[0], &pn[1]) {
+                            if *pid == param_id {
+                                let name = emitter.db.strings.resolve(*name_sid).to_string();
+                                var_map.insert(name, param_id);
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // Local variables (highest priority)
+    if let Some(rows) = emitter.db.scan("localvars") {
+        for t in rows {
+            if let (Value::Entity(id), Value::String(name_sid)) = (&t[0], &t[1]) {
+                let name = emitter.db.strings.resolve(*name_sid).to_string();
+                var_map.insert(name, *id);
+            }
+        }
+    }
+
+    // Step 4: Resolve variable accesses → variableBinding
+    let mut bindings: Vec<(EntityId, EntityId)> = Vec::new();
+    for var_id in &var_accesses {
+        if let Some(var_name) = expr_name_map.get(var_id) {
+            if let Some(&target_id) = var_map.get(var_name) {
+                bindings.push((*var_id, target_id));
+            }
+        }
+    }
+
+    // Step 5: Emit variableBinding rows
+    for (expr_id, variable_id) in bindings {
+        emitter.emit("variableBinding", vec![
+            Value::Entity(expr_id),
+            Value::Entity(variable_id),
+        ]);
     }
 }
 
@@ -354,16 +580,24 @@ fn extract_class(
     // Extract superclass
     if let Some(superclass) = node.child_by_field("superclass") {
         extract_extends(emitter, file_id, class_id, &superclass, source, type_map);
+    } else {
+        // Implicit extends java.lang.Object for classes/interfaces without explicit superclass.
+        // In the JVM, even interfaces have super_class = java.lang.Object.
+        let object_id = get_or_create_type(emitter, type_map, "Object");
+        emitter.emit("extendsReftype", vec![
+            Value::Entity(class_id),
+            Value::Entity(object_id),
+        ]);
     }
 
     // Extract interfaces
     if let Some(interfaces) = node.child_by_field("interfaces") {
-        extract_implements(emitter, file_id, class_id, &interfaces, source, type_map);
+        extract_type_refs(emitter, file_id, class_id, &interfaces, source, type_map, "implInterface");
     }
 
-    // Also check super_interfaces for interface declarations
+    // Interface-extends-interface uses extendsReftype (not implInterface)
     if let Some(super_interfaces) = node.child_by_field("super_interfaces") {
-        extract_implements(emitter, file_id, class_id, &super_interfaces, source, type_map);
+        extract_type_refs(emitter, file_id, class_id, &super_interfaces, source, type_map, "extendsReftype");
     }
 
     // Extract type parameters
@@ -373,7 +607,13 @@ fn extract_class(
 
     // Extract body
     if let Some(body) = node.child_by_field("body") {
-        extract_class_body(emitter, file_id, class_id, &body, source, type_map);
+        let has_constructor = extract_class_body(emitter, file_id, class_id, &body, source, type_map);
+
+        // Generate implicit default constructor for classes without explicit ones
+        // (interfaces don't get default constructors)
+        if !is_interface && !has_constructor {
+            emit_default_constructor(emitter, file_id, class_id, &name, node);
+        }
     }
 }
 
@@ -421,14 +661,17 @@ fn extract_extends(
     }
 }
 
-/// Extract implemented interfaces from an `interfaces` or `super_interfaces` field.
-fn extract_implements(
+/// Extract type references from a type_list node, emitting to the given table.
+/// Used for both `implInterface` (class implements interface) and `extendsReftype`
+/// (interface extends interface).
+fn extract_type_refs(
     emitter: &mut FactEmitter<'_>,
     _file_id: EntityId,
     class_id: EntityId,
     node: &Node<'_>,
     source: &[u8],
     type_map: &mut TypeMap,
+    table: &str,
 ) {
     // The node is a `type_list` containing type identifiers
     let mut cursor = node.walk();
@@ -458,14 +701,14 @@ fn extract_implements(
                     type_map.insert(type_name, id);
                     id
                 };
-                emitter.emit("implInterface", vec![
+                emitter.emit(table, vec![
                     Value::Entity(class_id),
                     Value::Entity(iface_id),
                 ]);
             }
             // Also check type_list children
             if child.kind() == "type_list" {
-                extract_implements(emitter, _file_id, class_id, &child, source, type_map);
+                extract_type_refs(emitter, _file_id, class_id, &child, source, type_map, table);
             }
             if !cursor.goto_next_sibling() { break; }
         }
@@ -490,6 +733,29 @@ fn extract_type_name(node: &Node<'_>, source: &[u8]) -> String {
 /// Extract full type text (including generics, arrays, etc.)
 fn extract_full_type(node: &Node<'_>, source: &[u8]) -> String {
     node.text(source).to_string()
+}
+
+/// Get or create a `classes_or_interfaces` entry for a type by simple name.
+/// Reuses existing entity from `type_map` if already seen.
+fn get_or_create_type(
+    emitter: &mut FactEmitter<'_>,
+    type_map: &mut TypeMap,
+    name: &str,
+) -> EntityId {
+    if let Some(&id) = type_map.get(name) {
+        return id;
+    }
+    let id = emitter.alloc();
+    let dummy_pkg = emitter.alloc();
+    let name_val = emitter.string(name);
+    emitter.emit("classes_or_interfaces", vec![
+        Value::Entity(id),
+        name_val,
+        Value::Entity(dummy_pkg),
+        Value::Entity(id),
+    ]);
+    type_map.insert(name.to_string(), id);
+    id
 }
 
 /// Extract an enum declaration.
@@ -537,12 +803,53 @@ fn extract_enum(
 
     // Extract interfaces
     if let Some(interfaces) = node.child_by_field("interfaces") {
-        extract_implements(emitter, file_id, class_id, &interfaces, source, type_map);
+        extract_type_refs(emitter, file_id, class_id, &interfaces, source, type_map, "implInterface");
     }
+
+    // Implicit extends Enum (like CodeQL)
+    let enum_id = get_or_create_type(emitter, type_map, "Enum");
+    emitter.emit("extendsReftype", vec![
+        Value::Entity(class_id),
+        Value::Entity(enum_id),
+    ]);
 
     // Extract enum body
     if let Some(body) = node.child_by_field("body") {
         extract_enum_body(emitter, file_id, class_id, &body, source, type_map);
+    }
+
+    // Emit compiler-generated valueOf(String) and values() methods
+    emit_enum_synthetic_methods(emitter, file_id, class_id, &name, node);
+
+    // Emit implicit enum constructor (every enum has a private constructor)
+    {
+        let constr_id = emitter.alloc();
+        let loc_id = LocationEmitter::emit_for_node(emitter, file_id, node);
+        let sig = format!("{}(String, int)", name);
+        let name_val = emitter.string(&name);
+        let sig_val = emitter.string(&sig);
+        let type_val = emitter.string(&name);
+        emitter.emit("constrs", vec![
+            Value::Entity(constr_id),
+            name_val,
+            sig_val,
+            type_val,
+            Value::Entity(class_id),
+            Value::Entity(constr_id),
+        ]);
+        emitter.emit("declaresMember", vec![
+            Value::Entity(class_id),
+            Value::Entity(constr_id),
+        ]);
+        emitter.emit("hasLocation", vec![
+            Value::Entity(constr_id),
+            Value::Entity(loc_id),
+        ]);
+        let mod_id = emitter.alloc();
+        let mod_name = emitter.string("private");
+        emitter.emit("modifiers", vec![Value::Entity(mod_id), mod_name]);
+        emitter.emit("hasModifier", vec![Value::Entity(constr_id), Value::Entity(mod_id)]);
+        emitter.emit("compiler_generated", vec![Value::Entity(constr_id), Value::Int(1)]);
     }
 }
 
@@ -641,6 +948,7 @@ fn extract_annotation_type(
 }
 
 /// Extract the body of a class/interface.
+/// Returns true if an explicit constructor was found.
 fn extract_class_body(
     emitter: &mut FactEmitter<'_>,
     file_id: EntityId,
@@ -648,10 +956,11 @@ fn extract_class_body(
     body: &Node<'_>,
     source: &[u8],
     type_map: &mut TypeMap,
-) {
-    extract_class_body_children(emitter, file_id, class_id, body, source, type_map);
+) -> bool {
+    extract_class_body_children(emitter, file_id, class_id, body, source, type_map)
 }
 
+/// Returns true if an explicit constructor was found.
 fn extract_class_body_children(
     emitter: &mut FactEmitter<'_>,
     file_id: EntityId,
@@ -659,7 +968,8 @@ fn extract_class_body_children(
     body: &Node<'_>,
     source: &[u8],
     type_map: &mut TypeMap,
-) {
+) -> bool {
+    let mut has_constructor = false;
     let mut cursor = body.walk();
     if cursor.goto_first_child() {
         loop {
@@ -672,6 +982,7 @@ fn extract_class_body_children(
                     extract_method(emitter, file_id, class_id, &child, source);
                 }
                 "constructor_declaration" => {
+                    has_constructor = true;
                     extract_constructor(emitter, file_id, class_id, &child, source);
                 }
                 "class_declaration" => {
@@ -696,6 +1007,184 @@ fn extract_class_body_children(
             }
             if !cursor.goto_next_sibling() { break; }
         }
+    }
+    has_constructor
+}
+
+/// Emit a synthetic default constructor for a class that has no explicit one.
+/// In Java, every class without an explicit constructor gets a default no-arg constructor.
+fn emit_default_constructor(
+    emitter: &mut FactEmitter<'_>,
+    file_id: EntityId,
+    class_id: EntityId,
+    class_name: &str,
+    class_node: &Node<'_>,
+) {
+    let constr_id = emitter.alloc();
+    let loc_id = LocationEmitter::emit_for_node(emitter, file_id, class_node);
+
+    let sig = format!("{}()", class_name);
+    let name_val = emitter.string(class_name);
+    let sig_val = emitter.string(&sig);
+    let type_val = emitter.string(class_name);
+
+    emitter.emit("constrs", vec![
+        Value::Entity(constr_id),
+        name_val,
+        sig_val,
+        type_val,
+        Value::Entity(class_id),
+        Value::Entity(constr_id), // sourceid = self
+    ]);
+
+    emitter.emit("declaresMember", vec![
+        Value::Entity(class_id),
+        Value::Entity(constr_id),
+    ]);
+
+    emitter.emit("hasLocation", vec![
+        Value::Entity(constr_id),
+        Value::Entity(loc_id),
+    ]);
+
+    // Mark as default constructor
+    emitter.emit("isDefConstr", vec![
+        Value::Entity(constr_id),
+    ]);
+
+    // Default constructors are public
+    let mod_id = emitter.alloc();
+    let mod_name = emitter.string("public");
+    emitter.emit("modifiers", vec![
+        Value::Entity(mod_id),
+        mod_name,
+    ]);
+    emitter.emit("hasModifier", vec![
+        Value::Entity(constr_id),
+        Value::Entity(mod_id),
+    ]);
+
+    // Mark as compiler-generated (kind 1 = default constructor)
+    emitter.emit("compiler_generated", vec![
+        Value::Entity(constr_id),
+        Value::Int(1),
+    ]);
+
+    // Emit synthetic body: block with implicit super() call
+    let block_id = emitter.alloc();
+    emitter.emit("stmts", vec![
+        Value::Entity(block_id),
+        Value::Int(STMT_BLOCK),
+        Value::Entity(constr_id),
+        Value::Int(0),
+        Value::Entity(constr_id),
+    ]);
+    emitter.emit("hasLocation", vec![
+        Value::Entity(block_id),
+        Value::Entity(loc_id),
+    ]);
+
+    let super_id = emitter.alloc();
+    emitter.emit("stmts", vec![
+        Value::Entity(super_id),
+        Value::Int(20), // @superconstructorinvocationstmt
+        Value::Entity(block_id),
+        Value::Int(0),
+        Value::Entity(constr_id),
+    ]);
+    emitter.emit("hasLocation", vec![
+        Value::Entity(super_id),
+        Value::Entity(loc_id),
+    ]);
+}
+
+/// Emit compiler-generated `valueOf(String)` and `values()` methods for an enum.
+fn emit_enum_synthetic_methods(
+    emitter: &mut FactEmitter<'_>,
+    file_id: EntityId,
+    class_id: EntityId,
+    enum_name: &str,
+    enum_node: &Node<'_>,
+) {
+    let loc_id = LocationEmitter::emit_for_node(emitter, file_id, enum_node);
+
+    // static values() method
+    {
+        let method_id = emitter.alloc();
+        let name_val = emitter.string("values");
+        let sig_val = emitter.string("values()");
+        let type_val = emitter.string(&format!("{}[]", enum_name));
+        emitter.emit("methods", vec![
+            Value::Entity(method_id),
+            name_val,
+            sig_val,
+            type_val,
+            Value::Entity(class_id),
+            Value::Entity(method_id),
+        ]);
+        emitter.emit("declaresMember", vec![
+            Value::Entity(class_id),
+            Value::Entity(method_id),
+        ]);
+        emitter.emit("hasLocation", vec![
+            Value::Entity(method_id),
+            Value::Entity(loc_id),
+        ]);
+        // public static
+        let pub_id = emitter.alloc();
+        let pub_name = emitter.string("public");
+        emitter.emit("modifiers", vec![Value::Entity(pub_id), pub_name]);
+        emitter.emit("hasModifier", vec![Value::Entity(method_id), Value::Entity(pub_id)]);
+        let static_id = emitter.alloc();
+        let static_name = emitter.string("static");
+        emitter.emit("modifiers", vec![Value::Entity(static_id), static_name]);
+        emitter.emit("hasModifier", vec![Value::Entity(method_id), Value::Entity(static_id)]);
+        emitter.emit("compiler_generated", vec![Value::Entity(method_id), Value::Int(1)]);
+    }
+
+    // static valueOf(String) method
+    {
+        let method_id = emitter.alloc();
+        let name_val = emitter.string("valueOf");
+        let sig_val = emitter.string("valueOf(String)");
+        let type_val = emitter.string(enum_name);
+        emitter.emit("methods", vec![
+            Value::Entity(method_id),
+            name_val,
+            sig_val,
+            type_val,
+            Value::Entity(class_id),
+            Value::Entity(method_id),
+        ]);
+        emitter.emit("declaresMember", vec![
+            Value::Entity(class_id),
+            Value::Entity(method_id),
+        ]);
+        emitter.emit("hasLocation", vec![
+            Value::Entity(method_id),
+            Value::Entity(loc_id),
+        ]);
+        // public static
+        let pub_id = emitter.alloc();
+        let pub_name = emitter.string("public");
+        emitter.emit("modifiers", vec![Value::Entity(pub_id), pub_name]);
+        emitter.emit("hasModifier", vec![Value::Entity(method_id), Value::Entity(pub_id)]);
+        let static_id = emitter.alloc();
+        let static_name = emitter.string("static");
+        emitter.emit("modifiers", vec![Value::Entity(static_id), static_name]);
+        emitter.emit("hasModifier", vec![Value::Entity(method_id), Value::Entity(static_id)]);
+        emitter.emit("compiler_generated", vec![Value::Entity(method_id), Value::Int(1)]);
+
+        // Parameter: String name
+        let param_id = emitter.alloc();
+        let param_type = emitter.string("String");
+        emitter.emit("params", vec![
+            Value::Entity(param_id),
+            param_type,
+            Value::Int(0),
+            Value::Entity(method_id),
+            Value::Entity(param_id),
+        ]);
     }
 }
 
@@ -796,6 +1285,32 @@ fn extract_method(
 
     extract_modifiers(emitter, file_id, node, source, method_id);
 
+    // Interface methods are implicitly public and abstract (unless default/static).
+    // Check if the enclosing declaration is an interface.
+    let in_interface = node.parent()
+        .and_then(|p| p.parent())
+        .map_or(false, |gp| gp.kind() == "interface_declaration");
+    if in_interface {
+        // Add implicit "public" if not explicitly present
+        let has_public = has_modifier(node, source, "public");
+        if !has_public {
+            let mod_id = emitter.alloc();
+            let mod_name = emitter.string("public");
+            emitter.emit("modifiers", vec![Value::Entity(mod_id), mod_name]);
+            emitter.emit("hasModifier", vec![Value::Entity(method_id), Value::Entity(mod_id)]);
+        }
+        // Add implicit "abstract" if not default and not static
+        let has_abstract = has_modifier(node, source, "abstract");
+        let has_default = has_modifier(node, source, "default");
+        let has_static = has_modifier(node, source, "static");
+        if !has_abstract && !has_default && !has_static {
+            let mod_id = emitter.alloc();
+            let mod_name = emitter.string("abstract");
+            emitter.emit("modifiers", vec![Value::Entity(mod_id), mod_name]);
+            emitter.emit("hasModifier", vec![Value::Entity(method_id), Value::Entity(mod_id)]);
+        }
+    }
+
     // Extract annotations on the method
     extract_annotations_on(emitter, file_id, node, source, method_id);
 
@@ -862,7 +1377,64 @@ fn extract_constructor(
     }
 
     if let Some(body) = node.child_by_field("body") {
+        // Check if body starts with explicit_constructor_invocation (super()/this())
+        let has_explicit_ctor_call = {
+            let mut cursor = body.walk();
+            let mut found = false;
+            if cursor.goto_first_child() {
+                loop {
+                    let child = cursor.node();
+                    if child.kind() == "explicit_constructor_invocation" {
+                        found = true;
+                        break;
+                    }
+                    // Skip non-statement nodes (braces, whitespace)
+                    if child.is_named() {
+                        break; // First named child is not explicit_constructor_invocation
+                    }
+                    if !cursor.goto_next_sibling() { break; }
+                }
+            }
+            found
+        };
+
         extract_method_body(emitter, file_id, constr_id, &body, source);
+
+        // Emit implicit super() call if no explicit this()/super() was found
+        if !has_explicit_ctor_call {
+            // Find the block statement ID emitted as child of this constructor
+            let block_id = {
+                let mut found = None;
+                if let Some(rows) = emitter.db.scan("stmts") {
+                    for t in rows {
+                        if let (Value::Entity(sid), Value::Int(0), Value::Entity(pid), Value::Int(0)) =
+                            (&t[0], &t[1], &t[2], &t[3])
+                        {
+                            if *pid == constr_id {
+                                found = Some(*sid);
+                                break;
+                            }
+                        }
+                    }
+                }
+                found
+            };
+            if let Some(block_id) = block_id {
+                let super_id = emitter.alloc();
+                let loc_id = LocationEmitter::emit_for_node(emitter, file_id, &body);
+                emitter.emit("stmts", vec![
+                    Value::Entity(super_id),
+                    Value::Int(20), // @superconstructorinvocationstmt
+                    Value::Entity(block_id),
+                    Value::Int(-1), // synthetic, before first real statement
+                    Value::Entity(constr_id),
+                ]);
+                emitter.emit("hasLocation", vec![
+                    Value::Entity(super_id),
+                    Value::Entity(loc_id),
+                ]);
+            }
+        }
     }
 }
 
@@ -980,6 +1552,30 @@ fn extract_modifiers(
     }
 }
 
+/// Check if a declaration node has a specific modifier keyword in its source.
+fn has_modifier(node: &Node<'_>, source: &[u8], modifier: &str) -> bool {
+    let mut cursor = node.walk();
+    if cursor.goto_first_child() {
+        loop {
+            let child = cursor.node();
+            if child.kind() == "modifiers" {
+                let mut inner = child.walk();
+                if inner.goto_first_child() {
+                    loop {
+                        if inner.node().text(source) == modifier {
+                            return true;
+                        }
+                        if !inner.goto_next_sibling() { break; }
+                    }
+                }
+                return false;
+            }
+            if !cursor.goto_next_sibling() { break; }
+        }
+    }
+    false
+}
+
 fn is_modifier_text(text: &str) -> bool {
     matches!(text,
         "public" | "private" | "protected" | "static" | "final"
@@ -1022,6 +1618,15 @@ fn extract_annotations_on(
                             emitter.emit("hasLocation", vec![
                                 Value::Entity(ann_id),
                                 Value::Entity(loc_id),
+                            ]);
+                            // Also emit as declannotation expression (kind 66)
+                            let ann_type = emitter.string(&ann_name);
+                            emitter.emit("exprs", vec![
+                                Value::Entity(ann_id),
+                                Value::Int(EXPR_DECLANNOTATION),
+                                ann_type,
+                                Value::Entity(parent_id),
+                                Value::Int(-2), // annotation child
                             ]);
                         }
                         if !inner.goto_next_sibling() { break; }
@@ -1258,8 +1863,21 @@ fn extract_stmt(
             }
         }
         "for_statement" => {
+            // Extract init (may be local_variable_declaration or expression_statement)
+            if let Some(init) = node.child_by_field("init") {
+                extract_stmt(emitter, file_id, &init, source, callable_id, stmt_id, 0);
+            }
+            // Extract condition expression
+            if let Some(cond) = node.child_by_field("condition") {
+                extract_expr(emitter, file_id, &cond, source, callable_id, stmt_id, 1);
+            }
+            // Extract update expression(s)
+            if let Some(update) = node.child_by_field("update") {
+                extract_expr(emitter, file_id, &update, source, callable_id, stmt_id, 2);
+            }
+            // Extract body
             if let Some(body) = node.child_by_field("body") {
-                extract_stmt(emitter, file_id, &body, source, callable_id, stmt_id, 0);
+                extract_stmt(emitter, file_id, &body, source, callable_id, stmt_id, 3);
             }
         }
         "enhanced_for_statement" => {
@@ -1288,6 +1906,99 @@ fn extract_stmt(
             }
             if let Some(body) = node.child_by_field("body") {
                 extract_stmt(emitter, file_id, &body, source, callable_id, stmt_id, 0);
+            }
+        }
+        "switch_expression" => {
+            // Extract condition
+            if let Some(cond) = node.child_by_field("condition") {
+                extract_expr(emitter, file_id, &cond, source, callable_id, stmt_id, 0);
+            }
+            // Extract switch body — case labels and their statements
+            if let Some(body) = node.child_by_field("body") {
+                let mut case_idx = 0i64;
+                let mut cursor = body.walk();
+                if cursor.goto_first_child() {
+                    loop {
+                        let child = cursor.node();
+                        match child.kind() {
+                            "switch_block_statement_group" => {
+                                // Each group has switch_label(s) and statement(s)
+                                let mut inner = child.walk();
+                                if inner.goto_first_child() {
+                                    loop {
+                                        let item = inner.node();
+                                        if item.kind() == "switch_label" {
+                                            // Emit case label as STMT_CASE
+                                            let case_id = emitter.alloc();
+                                            let case_loc = LocationEmitter::emit_for_node(emitter, file_id, &item);
+                                            emitter.emit("stmts", vec![
+                                                Value::Entity(case_id),
+                                                Value::Int(STMT_CASE),
+                                                Value::Entity(stmt_id),
+                                                Value::Int(case_idx),
+                                                Value::Entity(callable_id),
+                                            ]);
+                                            emitter.emit("hasLocation", vec![
+                                                Value::Entity(case_id),
+                                                Value::Entity(case_loc),
+                                            ]);
+                                            // Extract case value expression(s)
+                                            let mut expr_idx = 0i64;
+                                            let mut label_cursor = item.walk();
+                                            if label_cursor.goto_first_child() {
+                                                loop {
+                                                    let label_child = label_cursor.node();
+                                                    if label_child.is_named() {
+                                                        extract_expr(emitter, file_id, &label_child, source, callable_id, case_id, expr_idx);
+                                                        expr_idx += 1;
+                                                    }
+                                                    if !label_cursor.goto_next_sibling() { break; }
+                                                }
+                                            }
+                                            case_idx += 1;
+                                        } else if item.is_named() {
+                                            // Statement inside the case group
+                                            extract_stmt(emitter, file_id, &item, source, callable_id, stmt_id, case_idx);
+                                            case_idx += 1;
+                                        }
+                                        if !inner.goto_next_sibling() { break; }
+                                    }
+                                }
+                            }
+                            "switch_rule" => {
+                                // Arrow-style case: switch_label -> expression/block/throw
+                                let mut inner = child.walk();
+                                if inner.goto_first_child() {
+                                    loop {
+                                        let item = inner.node();
+                                        if item.kind() == "switch_label" {
+                                            let case_id = emitter.alloc();
+                                            let case_loc = LocationEmitter::emit_for_node(emitter, file_id, &item);
+                                            emitter.emit("stmts", vec![
+                                                Value::Entity(case_id),
+                                                Value::Int(STMT_CASE),
+                                                Value::Entity(stmt_id),
+                                                Value::Int(case_idx),
+                                                Value::Entity(callable_id),
+                                            ]);
+                                            emitter.emit("hasLocation", vec![
+                                                Value::Entity(case_id),
+                                                Value::Entity(case_loc),
+                                            ]);
+                                            case_idx += 1;
+                                        } else if item.is_named() {
+                                            extract_stmt(emitter, file_id, &item, source, callable_id, stmt_id, case_idx);
+                                            case_idx += 1;
+                                        }
+                                        if !inner.goto_next_sibling() { break; }
+                                    }
+                                }
+                            }
+                            _ => {}
+                        }
+                        if !cursor.goto_next_sibling() { break; }
+                    }
+                }
             }
         }
         "return_statement" => {
@@ -1319,6 +2030,7 @@ fn extract_stmt(
             let type_text = node.child_by_field("type")
                 .map(|t| extract_full_type(&t, source))
                 .unwrap_or_else(|| "unknown".to_string());
+            let mut decl_idx = 0i64;
             let mut cursor = node.walk();
             if cursor.goto_first_child() {
                 loop {
@@ -1343,10 +2055,30 @@ fn extract_stmt(
                                 Value::Entity(loc_id),
                             ]);
 
+                            // Emit localvariabledeclexpr (kind 56)
+                            let decl_expr_id = emitter.alloc();
+                            let type_val2 = emitter.string(&type_text);
+                            emitter.emit("exprs", vec![
+                                Value::Entity(decl_expr_id),
+                                Value::Int(EXPR_LOCALVARDECL),
+                                type_val2,
+                                Value::Entity(stmt_id),
+                                Value::Int(decl_idx),
+                            ]);
+                            emitter.emit("hasLocation", vec![
+                                Value::Entity(decl_expr_id),
+                                Value::Entity(loc_id),
+                            ]);
+                            emitter.emit("variableBinding", vec![
+                                Value::Entity(decl_expr_id),
+                                Value::Entity(var_id),
+                            ]);
+
                             // Extract initializer expression
                             if let Some(value) = child.child_by_field("value") {
-                                extract_expr(emitter, file_id, &value, source, callable_id, stmt_id, 0);
+                                extract_expr(emitter, file_id, &value, source, callable_id, decl_expr_id, 0);
                             }
+                            decl_idx += 1;
                         }
                     }
                     if !cursor.goto_next_sibling() { break; }
@@ -1505,7 +2237,9 @@ fn extract_expr(
         let text = node.text(source);
         // For string literals, strip surrounding quotes
         let value = if expr_kind == EXPR_STRING_LIT {
-            text.trim_matches('"').to_string()
+            unescape_java_string(text.trim_matches('"'))
+        } else if expr_kind == EXPR_CHAR_LIT {
+            unescape_java_string(text.trim_matches('\''))
         } else {
             text.to_string()
         };
@@ -1516,6 +2250,71 @@ fn extract_expr(
             value_val,
             Value::Entity(expr_id),
         ]);
+    }
+
+    // Emit namestrings for method invocations (method name)
+    if expr_kind == EXPR_METHODACCESS {
+        if let Some(name_node) = node.child_by_field("name") {
+            let method_name = name_node.text(source);
+            let name_val = emitter.string(method_name);
+            let value_val = emitter.string(method_name);
+            emitter.emit("namestrings", vec![
+                name_val,
+                value_val,
+                Value::Entity(expr_id),
+            ]);
+        }
+    }
+
+    // Emit namestrings for object creation expressions (type name)
+    if expr_kind == EXPR_NEW {
+        if let Some(type_node) = node.child_by_field("type") {
+            let type_name = type_node.text(source);
+            let name_val = emitter.string(type_name);
+            let value_val = emitter.string(type_name);
+            emitter.emit("namestrings", vec![
+                name_val,
+                value_val,
+                Value::Entity(expr_id),
+            ]);
+            // Emit type access expression (kind 62) as child of new expr
+            let ta_id = emitter.alloc();
+            let ta_loc = LocationEmitter::emit_for_node(emitter, file_id, &type_node);
+            let ta_type = emitter.string(type_name);
+            emitter.emit("exprs", vec![
+                Value::Entity(ta_id),
+                Value::Int(EXPR_TYPEACCESS),
+                ta_type,
+                Value::Entity(expr_id),
+                Value::Int(-1), // type child
+            ]);
+            emitter.emit("hasLocation", vec![
+                Value::Entity(ta_id),
+                Value::Entity(ta_loc),
+            ]);
+        }
+    }
+
+    // Emit namestrings for variable accesses (identifier name)
+    if expr_kind == EXPR_VARACCESS {
+        let var_name = if node.kind() == "field_access" {
+            // For field access, use the field name
+            node.child_by_field("field")
+                .map(|n| n.text(source).to_string())
+                .unwrap_or_default()
+        } else {
+            // For plain identifier
+            node.text(source).to_string()
+        };
+        if !var_name.is_empty() {
+            let name_val = emitter.string(&var_name);
+            let value_val = emitter.string(&var_name);
+            emitter.emit("namestrings", vec![
+                name_val,
+                value_val,
+                Value::Entity(expr_id),
+            ]);
+        }
     }
 
     // Recurse into children
@@ -1670,6 +2469,42 @@ fn java_assign_op_kind(op: &str) -> i64 {
 }
 
 /// Extract a comment node.
+/// Unescape Java string escape sequences to their actual character values.
+fn unescape_java_string(s: &str) -> String {
+    let mut result = String::with_capacity(s.len());
+    let mut chars = s.chars();
+    while let Some(c) = chars.next() {
+        if c == '\\' {
+            match chars.next() {
+                Some('n') => result.push('\n'),
+                Some('t') => result.push('\t'),
+                Some('r') => result.push('\r'),
+                Some('\\') => result.push('\\'),
+                Some('"') => result.push('"'),
+                Some('\'') => result.push('\''),
+                Some('0') => result.push('\0'),
+                Some('u') => {
+                    // Unicode escape: \uXXXX
+                    let hex: String = chars.by_ref().take(4).collect();
+                    if let Ok(code) = u32::from_str_radix(&hex, 16) {
+                        if let Some(ch) = char::from_u32(code) {
+                            result.push(ch);
+                        }
+                    }
+                }
+                Some(other) => {
+                    result.push('\\');
+                    result.push(other);
+                }
+                None => result.push('\\'),
+            }
+        } else {
+            result.push(c);
+        }
+    }
+    result
+}
+
 fn extract_comment(
     emitter: &mut FactEmitter<'_>,
     file_id: EntityId,

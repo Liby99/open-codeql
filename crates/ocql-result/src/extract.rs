@@ -13,12 +13,19 @@ use crate::result::{ColumnDef, ColumnType, QueryResult, ResultValue};
 /// Finds all `select_result_*` relations, reads their tuples, resolves
 /// interned strings, and returns a `QueryResult`.
 pub fn extract_query_result(db: &Database, metadata: QueryMetadata) -> QueryResult {
-    // Find select_result relations (there should be exactly one for a simple query)
+    // Prefer select_output (projected columns only) over select_result (all columns)
     let mut select_names: Vec<String> = db
         .relation_names()
-        .filter(|n| n.starts_with("select_result"))
+        .filter(|n| n.starts_with("select_output"))
         .map(|n| n.to_string())
         .collect();
+    if select_names.is_empty() {
+        select_names = db
+            .relation_names()
+            .filter(|n| n.starts_with("select_result"))
+            .map(|n| n.to_string())
+            .collect();
+    }
     select_names.sort();
 
     if select_names.is_empty() {

@@ -444,7 +444,27 @@ fn lower_select(ctx: &mut LowerCtx, select: &Select) -> Result<(), LowerError> {
         }
     }
 
-    ctx.emit_predicate(MirPredicate::new(&select_name, params, atoms));
+    ctx.emit_predicate(MirPredicate::new(&select_name, params.clone(), atoms));
+
+    // Emit a projection predicate that contains only the select columns.
+    // This makes `select_result_0` contain all join vars + select vars (for engine use),
+    // while `select_output_0` contains only the selected output columns.
+    if !select_vars.is_empty() {
+        let output_name = select_name.replace("select_result", "select_output");
+        let output_params: Vec<MirParam> = select_vars.iter()
+            .map(|v| MirParam::new(v, MirType::Any))
+            .collect();
+        let mut output_atoms = vec![
+            MirAtom::Scan(MirScan::new(
+                &select_name,
+                params.iter().map(|p| MirTerm::var(&p.name)).collect(),
+            ))
+        ];
+        // No additional constraints needed — just project
+        let _ = &mut output_atoms;
+        ctx.emit_predicate(MirPredicate::new(&output_name, output_params, output_atoms));
+    }
+
     Ok(())
 }
 
@@ -1433,6 +1453,23 @@ fn lower_aggregation(
 
     // Build the auxiliary predicate body
     let mut inner_atoms = Vec::new();
+
+    // Register type constraints for quantified variables (like lower_exists does)
+    for v in vars {
+        match &v.ty.kind {
+            TypeExprKind::ClassName(name) => {
+                ctx.register_class_var(&v.name.name, &name.name, &mut inner_atoms);
+            }
+            TypeExprKind::Database(db_type) => {
+                inner_atoms.push(MirAtom::Scan(MirScan::new(
+                    &format!("@{}#char", db_type),
+                    vec![MirTerm::var(&v.name.name)],
+                )));
+            }
+            _ => {}
+        }
+    }
+
     if let Some(g) = guard {
         lower_formula(ctx, g, &mut inner_atoms, &aux_name)?;
     }
@@ -1445,6 +1482,14 @@ fn lower_aggregation(
             left: MirTerm::var(&agg_var_name),
             op: MirCompOp::Eq,
             right: term,
+        }));
+    } else if let Some(first_var) = vars.first() {
+        // No expr: aggregate over the first quantified variable
+        // e.g., count(@stmt id | ...) counts distinct values of id
+        inner_atoms.push(MirAtom::Guard(MirGuard {
+            left: MirTerm::var(&agg_var_name),
+            op: MirCompOp::Eq,
+            right: MirTerm::var(&first_var.name.name),
         }));
     }
 

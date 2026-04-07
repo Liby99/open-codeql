@@ -10,6 +10,7 @@ ocql-schema = { path = "../ocql-schema" }
 ocql-extractor-common = { path = "../ocql-extractor-common" }
 tree-sitter = "0.26"
 tree-sitter-java = "0.23"
+zip = { version = "2", default-features = false, features = ["deflate"] }
 
 [[bin]]
 name = "extract-java"
