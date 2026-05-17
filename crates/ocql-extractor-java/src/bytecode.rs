@@ -67,6 +67,8 @@ pub struct ClassFile {
     pub interfaces: Vec<String>,
     pub fields: Vec<FieldInfo>,
     pub methods: Vec<MethodInfo>,
+    /// String constants from the constant pool (CONSTANT_String entries).
+    pub string_constants: Vec<String>,
 }
 
 /// A field declared in the class file.
@@ -242,6 +244,19 @@ impl ConstantPool {
             ))),
         }
     }
+
+    /// Collect all CONSTANT_String entries (resolved to their UTF-8 values).
+    fn collect_string_constants(&self) -> Vec<String> {
+        let mut result = Vec::new();
+        for entry in &self.entries {
+            if let CpEntry::StringRef(utf8_idx) = entry {
+                if let Ok(s) = self.get_utf8(*utf8_idx) {
+                    result.push(s.to_string());
+                }
+            }
+        }
+        result
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -304,6 +319,9 @@ pub fn parse_class(data: &[u8]) -> Result<ClassFile, ParseError> {
         methods.push(read_field_or_method(&mut r, &cp, "method")?);
     }
 
+    // Collect string constants from constant pool
+    let string_constants = cp.collect_string_constants();
+
     // Class-level attributes (skip)
     skip_attributes(&mut r)?;
 
@@ -314,6 +332,7 @@ pub fn parse_class(data: &[u8]) -> Result<ClassFile, ParseError> {
         this_class,
         super_class,
         interfaces,
+        string_constants,
         fields: fields
             .into_iter()
             .map(|(af, n, d)| FieldInfo {

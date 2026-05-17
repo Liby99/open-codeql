@@ -115,10 +115,11 @@ const EXPR_ARRAYTYPEACCESS: i64 = 63;
 const EXPR_DECLANNOTATION: i64 = 66;
 
 // Import kind constants
-const IMPORT_SINGLE: i64 = 1;
-const IMPORT_ON_DEMAND: i64 = 2;
-const IMPORT_STATIC_SINGLE: i64 = 3;
+const IMPORT_SINGLE_TYPE: i64 = 1;
+const IMPORT_ON_DEMAND_FROM_TYPE: i64 = 2;
+const IMPORT_ON_DEMAND_FROM_PACKAGE: i64 = 3;
 const IMPORT_STATIC_ON_DEMAND: i64 = 4;
+const IMPORT_STATIC_SINGLE: i64 = 5;
 
 impl Extractor for JavaExtractor {
     fn language(&self) -> Language {
@@ -471,11 +472,28 @@ fn extract_import(
     let is_static = import_text.contains("static ");
     let is_star = import_text.contains(".*");
 
-    let kind = match (is_static, is_star) {
-        (false, false) => IMPORT_SINGLE,
-        (false, true) => IMPORT_ON_DEMAND,
-        (true, false) => IMPORT_STATIC_SINGLE,
-        (true, true) => IMPORT_STATIC_ON_DEMAND,
+    // Determine if the import target is a type (uppercase) or package (lowercase)
+    // e.g., "import java.io.*" → package on-demand (kind 3)
+    //        "import java.util.Map.*" → type on-demand (kind 2)
+    let target_is_type = {
+        // Extract the path before ".*" or the last segment
+        let path = import_text
+            .trim_end_matches(';')
+            .trim_end_matches(".*")
+            .trim();
+        // Check if last segment starts with uppercase
+        path.rsplit('.').next()
+            .and_then(|s| s.chars().next())
+            .map(|c| c.is_uppercase())
+            .unwrap_or(false)
+    };
+
+    let kind = match (is_static, is_star, target_is_type) {
+        (false, false, _) => IMPORT_SINGLE_TYPE,
+        (false, true, true) => IMPORT_ON_DEMAND_FROM_TYPE,
+        (false, true, false) => IMPORT_ON_DEMAND_FROM_PACKAGE,
+        (true, true, _) => IMPORT_STATIC_ON_DEMAND,
+        (true, false, _) => IMPORT_STATIC_SINGLE,
     };
 
     // Find the imported name
@@ -607,12 +625,18 @@ fn extract_class(
 
     // Extract body
     if let Some(body) = node.child_by_field("body") {
-        let has_constructor = extract_class_body(emitter, file_id, class_id, &body, source, type_map);
+        let (has_constructor, has_instance_field_init) =
+            extract_class_body(emitter, file_id, class_id, &body, source, type_map);
 
         // Generate implicit default constructor for classes without explicit ones
         // (interfaces don't get default constructors)
         if !is_interface && !has_constructor {
             emit_default_constructor(emitter, file_id, class_id, &name, node);
+        }
+
+        // Emit synthetic <obinit> method for classes with instance field initializers
+        if !is_interface && has_instance_field_init {
+            emit_obinit(emitter, file_id, class_id, node);
         }
     }
 }
@@ -893,7 +917,7 @@ fn extract_enum_body(
                 }
                 "enum_body_declarations" => {
                     // Regular class body inside enum
-                    extract_class_body_children(emitter, file_id, class_id, &child, source, type_map);
+                    let _ = extract_class_body_children(emitter, file_id, class_id, &child, source, type_map);
                 }
                 _ => {}
             }
@@ -949,6 +973,7 @@ fn extract_annotation_type(
 
 /// Extract the body of a class/interface.
 /// Returns true if an explicit constructor was found.
+/// Returns (has_constructor, has_instance_field_init).
 fn extract_class_body(
     emitter: &mut FactEmitter<'_>,
     file_id: EntityId,
@@ -956,11 +981,11 @@ fn extract_class_body(
     body: &Node<'_>,
     source: &[u8],
     type_map: &mut TypeMap,
-) -> bool {
+) -> (bool, bool) {
     extract_class_body_children(emitter, file_id, class_id, body, source, type_map)
 }
 
-/// Returns true if an explicit constructor was found.
+/// Returns (has_constructor, has_instance_field_init).
 fn extract_class_body_children(
     emitter: &mut FactEmitter<'_>,
     file_id: EntityId,
@@ -968,8 +993,9 @@ fn extract_class_body_children(
     body: &Node<'_>,
     source: &[u8],
     type_map: &mut TypeMap,
-) -> bool {
+) -> (bool, bool) {
     let mut has_constructor = false;
+    let mut has_instance_field_init = false;
     let mut cursor = body.walk();
     if cursor.goto_first_child() {
         loop {
@@ -977,6 +1003,21 @@ fn extract_class_body_children(
             match child.kind() {
                 "field_declaration" => {
                     extract_field(emitter, file_id, class_id, &child, source);
+                    // Check if this is a non-static field with an initializer
+                    if !has_instance_field_init && !has_modifier(&child, source, "static") {
+                        let mut fc = child.walk();
+                        if fc.goto_first_child() {
+                            loop {
+                                if fc.node().kind() == "variable_declarator"
+                                    && fc.node().child_by_field("value").is_some()
+                                {
+                                    has_instance_field_init = true;
+                                    break;
+                                }
+                                if !fc.goto_next_sibling() { break; }
+                            }
+                        }
+                    }
                 }
                 "method_declaration" => {
                     extract_method(emitter, file_id, class_id, &child, source);
@@ -1008,7 +1049,7 @@ fn extract_class_body_children(
             if !cursor.goto_next_sibling() { break; }
         }
     }
-    has_constructor
+    (has_constructor, has_instance_field_init)
 }
 
 /// Emit a synthetic default constructor for a class that has no explicit one.
@@ -1096,6 +1137,93 @@ fn emit_default_constructor(
         Value::Entity(super_id),
         Value::Entity(loc_id),
     ]);
+}
+
+/// Emit a synthetic `<obinit>` method for classes with instance field initializers.
+///
+/// In CodeQL, `<obinit>` (object initializer) is a synthetic method that collects
+/// all instance field initializers and instance initializer blocks. Each constructor
+/// implicitly calls `<obinit>`. We emit the method and a callableBinding from each
+/// constructor to it.
+fn emit_obinit(
+    emitter: &mut FactEmitter<'_>,
+    file_id: EntityId,
+    class_id: EntityId,
+    class_node: &Node<'_>,
+) {
+    let obinit_id = emitter.alloc();
+    let loc_id = LocationEmitter::emit_for_node(emitter, file_id, class_node);
+
+    let name_val = emitter.string("<obinit>");
+    let sig_val = emitter.string("<obinit>()");
+    let ret_val = emitter.string("void");
+    emitter.emit("methods", vec![
+        Value::Entity(obinit_id),
+        name_val,
+        sig_val,
+        ret_val,
+        Value::Entity(class_id),
+        Value::Entity(obinit_id), // sourceid = self
+    ]);
+
+    emitter.emit("declaresMember", vec![
+        Value::Entity(class_id),
+        Value::Entity(obinit_id),
+    ]);
+
+    emitter.emit("hasLocation", vec![
+        Value::Entity(obinit_id),
+        Value::Entity(loc_id),
+    ]);
+
+    // Mark as compiler-generated
+    emitter.emit("compiler_generated", vec![
+        Value::Entity(obinit_id),
+        Value::Int(2), // kind 2 = instance initializer
+    ]);
+
+    // Find all constructors of this class and emit a synthetic call to <obinit>
+    // We scan the constrs table for entries belonging to this class.
+    let constr_ids: Vec<EntityId> = {
+        let mut ids = Vec::new();
+        if let Some(rows) = emitter.db.scan("constrs") {
+            for t in rows {
+                if let (Value::Entity(cid), Value::Entity(parent)) = (&t[0], &t[4]) {
+                    if *parent == class_id {
+                        ids.push(*cid);
+                    }
+                }
+            }
+        }
+        ids
+    };
+
+    for constr_id in constr_ids {
+        // Emit a synthetic method access expression (kind 61) calling <obinit>
+        let call_id = emitter.alloc();
+        let call_name = emitter.string("<obinit>");
+        let call_type = emitter.string("void");
+        emitter.emit("exprs", vec![
+            Value::Entity(call_id),
+            Value::Int(EXPR_METHODACCESS),
+            call_type,
+            Value::Entity(constr_id),
+            Value::Int(-3), // synthetic child index
+        ]);
+        emitter.emit("namestrings", vec![
+            call_name.clone(),
+            call_name,
+            Value::Entity(call_id),
+        ]);
+        emitter.emit("callableBinding", vec![
+            Value::Entity(call_id),
+            Value::Entity(obinit_id),
+        ]);
+        emitter.emit("hasLocation", vec![
+            Value::Entity(call_id),
+            Value::Entity(loc_id),
+        ]);
+    }
 }
 
 /// Emit compiler-generated `valueOf(String)` and `values()` methods for an enum.
