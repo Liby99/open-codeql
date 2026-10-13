@@ -84,7 +84,9 @@ fn parity_basic_classes() {
     let classes = collect_strings(&db, "classes_or_interfaces", 1);
     eprintln!("Classes: {:?}", classes);
 
-    // Expected: Printable, Animal, Dog, Cat, Color, StringUtils, BasicStructure
+    // Source classes: Printable, Animal, Dog, Cat, Color, StringUtils, BasicStructure.
+    // The extractor also emits implicit supertypes java.lang.Object and java.lang.Enum
+    // (CodeQL likewise extracts reachable JDK types into the same table).
     assert!(classes.contains("Printable"), "missing Printable");
     assert!(classes.contains("Animal"), "missing Animal");
     assert!(classes.contains("Dog"), "missing Dog");
@@ -92,7 +94,9 @@ fn parity_basic_classes() {
     assert!(classes.contains("Color"), "missing Color");
     assert!(classes.contains("StringUtils"), "missing StringUtils");
     assert!(classes.contains("BasicStructure"), "missing BasicStructure");
-    assert_eq!(classes.len(), 7, "expected 7 classes/interfaces, got {:?}", classes);
+    assert!(classes.contains("Object"), "missing implicit Object");
+    assert!(classes.contains("Enum"), "missing implicit Enum (Color is an enum)");
+    assert_eq!(classes.len(), 9, "expected 9 classes/interfaces, got {:?}", classes);
 }
 
 #[test]
@@ -380,10 +384,11 @@ fn parity_callgraph_classes() {
     let classes = collect_strings(&db, "classes_or_interfaces", 1);
     eprintln!("CallGraph classes: {:?}", classes);
 
+    // Source classes plus the implicit java.lang.Object supertype the extractor emits.
     let expected = [
         "Logger", "ConsoleLogger", "FileLogger", "Processor",
         "UpperCaseProcessor", "ReverseProcessor", "Pipeline",
-        "Base", "Derived", "MathHelper", "CallGraph",
+        "Base", "Derived", "MathHelper", "CallGraph", "Object",
     ];
     for name in expected {
         assert!(classes.contains(name), "missing class: {}", name);
