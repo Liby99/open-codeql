@@ -856,7 +856,12 @@ fn extract_class(
 
         // Emit synthetic <obinit> method for classes with instance field initializers
         if !is_interface && has_instance_field_init {
-            emit_obinit(emitter, file_id, class_id, node);
+            emit_obinit(emitter, file_id, class_id, node, source);
+        }
+
+        // Emit synthetic <clinit> for classes with static field initializers
+        if let Some(body) = node.child_by_field("body") {
+            emit_clinit(emitter, file_id, class_id, node, &body, source);
         }
     }
 }
@@ -1061,6 +1066,8 @@ fn extract_enum(
     // Extract enum body
     if let Some(body) = node.child_by_field("body") {
         extract_enum_body(emitter, file_id, class_id, &body, source, type_map, imports);
+        // Synthetic <clinit> holding one implicit class instance creation per constant
+        emit_clinit(emitter, file_id, class_id, node, &body, source);
     }
 
     // Emit compiler-generated valueOf(String) and values() methods
@@ -1375,6 +1382,7 @@ fn emit_obinit(
     file_id: EntityId,
     class_id: EntityId,
     class_node: &Node<'_>,
+    source: &[u8],
 ) {
     let obinit_id = emitter.alloc();
     let loc_id = LocationEmitter::emit_for_node(emitter, file_id, class_node);
@@ -1406,6 +1414,48 @@ fn emit_obinit(
         Value::Entity(obinit_id),
         Value::Int(2), // kind 2 = instance initializer
     ]);
+
+    // Move instance field initializer expressions into <obinit>: each becomes
+    // an ExprStmt in <obinit>'s body wrapping the initializer expression, so
+    // the expressions are enclosed by a source-defined callable (like CodeQL).
+    if let Some(body) = class_node.child_by_field("body") {
+        let mut stmt_idx = 0i64;
+        let mut cursor = body.walk();
+        if cursor.goto_first_child() {
+            loop {
+                let child = cursor.node();
+                if child.kind() == "field_declaration" && !has_modifier(&child, source, "static") {
+                    let mut fc = child.walk();
+                    if fc.goto_first_child() {
+                        loop {
+                            let decl = fc.node();
+                            if decl.kind() == "variable_declarator" {
+                                if let Some(value) = decl.child_by_field("value") {
+                                    let stmt_id = emitter.alloc();
+                                    let stmt_loc = LocationEmitter::emit_for_node(emitter, file_id, &decl);
+                                    emitter.emit("stmts", vec![
+                                        Value::Entity(stmt_id),
+                                        Value::Int(STMT_EXPR),
+                                        Value::Entity(obinit_id),
+                                        Value::Int(stmt_idx),
+                                        Value::Entity(obinit_id),
+                                    ]);
+                                    emitter.emit("hasLocation", vec![
+                                        Value::Entity(stmt_id),
+                                        Value::Entity(stmt_loc),
+                                    ]);
+                                    extract_expr(emitter, file_id, &value, source, obinit_id, stmt_id, 0);
+                                    stmt_idx += 1;
+                                }
+                            }
+                            if !fc.goto_next_sibling() { break; }
+                        }
+                    }
+                }
+                if !cursor.goto_next_sibling() { break; }
+            }
+        }
+    }
 
     // Find all constructors of this class and emit a synthetic call to <obinit>
     // We scan the constrs table for entries belonging to this class.
@@ -1444,10 +1494,161 @@ fn emit_obinit(
             Value::Entity(call_id),
             Value::Entity(obinit_id),
         ]);
+        emitter.emit("callableEnclosingExpr", vec![
+            Value::Entity(call_id),
+            Value::Entity(constr_id),
+        ]);
         emitter.emit("hasLocation", vec![
             Value::Entity(call_id),
             Value::Entity(loc_id),
         ]);
+    }
+}
+
+/// Emit a synthetic `<clinit>` (static initializer) method if the type has any
+/// static field initializers or enum constants.
+///
+/// In CodeQL, `<clinit>` collects static field initializers, static initializer
+/// blocks, and — for enums — one implicit class instance creation expression
+/// (kind 52) per enum constant. Each initializer becomes an ExprStmt inside
+/// `<clinit>` so the expressions are enclosed by a source-defined callable.
+fn emit_clinit(
+    emitter: &mut FactEmitter<'_>,
+    file_id: EntityId,
+    class_id: EntityId,
+    class_node: &Node<'_>,
+    body: &Node<'_>,
+    source: &[u8],
+) {
+    // Pre-scan: anything to put in <clinit>?
+    let mut has_content = false;
+    {
+        let mut cursor = body.walk();
+        if cursor.goto_first_child() {
+            loop {
+                let child = cursor.node();
+                match child.kind() {
+                    "enum_constant" => has_content = true,
+                    "field_declaration" if has_modifier(&child, source, "static") => {
+                        let mut fc = child.walk();
+                        if fc.goto_first_child() {
+                            loop {
+                                if fc.node().kind() == "variable_declarator"
+                                    && fc.node().child_by_field("value").is_some()
+                                {
+                                    has_content = true;
+                                    break;
+                                }
+                                if !fc.goto_next_sibling() { break; }
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+                if has_content || !cursor.goto_next_sibling() { break; }
+            }
+        }
+    }
+    if !has_content { return; }
+
+    let clinit_id = emitter.alloc();
+    let loc_id = LocationEmitter::emit_for_node(emitter, file_id, class_node);
+    let name_val = emitter.string("<clinit>");
+    let sig_val = emitter.string("<clinit>()");
+    let ret_val = emitter.string("void");
+    emitter.emit("methods", vec![
+        Value::Entity(clinit_id),
+        name_val,
+        sig_val,
+        ret_val,
+        Value::Entity(class_id),
+        Value::Entity(clinit_id), // sourceid = self
+    ]);
+    emitter.emit("declaresMember", vec![
+        Value::Entity(class_id),
+        Value::Entity(clinit_id),
+    ]);
+    emitter.emit("hasLocation", vec![
+        Value::Entity(clinit_id),
+        Value::Entity(loc_id),
+    ]);
+    emitter.emit("compiler_generated", vec![
+        Value::Entity(clinit_id),
+        Value::Int(3), // kind 3 = static initializer
+    ]);
+    let mod_id = emitter.alloc();
+    let mod_name = emitter.string("static");
+    emitter.emit("modifiers", vec![Value::Entity(mod_id), mod_name]);
+    emitter.emit("hasModifier", vec![Value::Entity(clinit_id), Value::Entity(mod_id)]);
+
+    // Fill <clinit>'s body: one ExprStmt per enum constant / static initializer.
+    let mut stmt_idx = 0i64;
+    let emit_expr_stmt = |emitter: &mut FactEmitter<'_>, decl: &Node<'_>, idx: i64| -> EntityId {
+        let stmt_id = emitter.alloc();
+        let stmt_loc = LocationEmitter::emit_for_node(emitter, file_id, decl);
+        emitter.emit("stmts", vec![
+            Value::Entity(stmt_id),
+            Value::Int(STMT_EXPR),
+            Value::Entity(clinit_id),
+            Value::Int(idx),
+            Value::Entity(clinit_id),
+        ]);
+        emitter.emit("hasLocation", vec![
+            Value::Entity(stmt_id),
+            Value::Entity(stmt_loc),
+        ]);
+        stmt_id
+    };
+
+    let mut cursor = body.walk();
+    if cursor.goto_first_child() {
+        loop {
+            let child = cursor.node();
+            match child.kind() {
+                "enum_constant" => {
+                    // Each enum constant is an implicit class instance creation
+                    // expression (kind 52), like CodeQL models it.
+                    let stmt_id = emit_expr_stmt(emitter, &child, stmt_idx);
+                    stmt_idx += 1;
+                    let expr_id = emitter.alloc();
+                    let expr_loc = LocationEmitter::emit_for_node(emitter, file_id, &child);
+                    let type_val = emitter.string("unknown");
+                    emitter.emit("exprs", vec![
+                        Value::Entity(expr_id),
+                        Value::Int(EXPR_NEW),
+                        type_val,
+                        Value::Entity(stmt_id),
+                        Value::Int(0),
+                    ]);
+                    emitter.emit("callableEnclosingExpr", vec![
+                        Value::Entity(expr_id),
+                        Value::Entity(clinit_id),
+                    ]);
+                    emitter.emit("hasLocation", vec![
+                        Value::Entity(expr_id),
+                        Value::Entity(expr_loc),
+                    ]);
+                }
+                "field_declaration" if has_modifier(&child, source, "static") => {
+                    let mut fc = child.walk();
+                    if fc.goto_first_child() {
+                        loop {
+                            let decl = fc.node();
+                            if decl.kind() == "variable_declarator" {
+                                if let Some(value) = decl.child_by_field("value") {
+                                    let stmt_id = emit_expr_stmt(emitter, &decl, stmt_idx);
+                                    stmt_idx += 1;
+                                    extract_expr(emitter, file_id, &value, source, clinit_id, stmt_id, 0);
+                                }
+                            }
+                            if !fc.goto_next_sibling() { break; }
+                        }
+                    }
+                }
+                _ => {}
+            }
+            if !cursor.goto_next_sibling() { break; }
+        }
     }
 }
 
@@ -2457,7 +2658,7 @@ fn extract_stmt(
             if let Some(body) = node.child_by_field("body") {
                 extract_stmt(emitter, file_id, &body, source, callable_id, stmt_id, 0);
             }
-            // Catch clauses
+            // Catch clauses and finally clause
             let mut catch_idx = 1i64;
             let mut cursor = node.walk();
             if cursor.goto_first_child() {
@@ -2466,6 +2667,20 @@ fn extract_stmt(
                     if child.kind() == "catch_clause" {
                         extract_stmt(emitter, file_id, &child, source, callable_id, stmt_id, catch_idx);
                         catch_idx += 1;
+                    } else if child.kind() == "finally_clause" {
+                        // The finally block is the clause's block child
+                        let mut fc = child.walk();
+                        if fc.goto_first_child() {
+                            loop {
+                                if fc.node().kind() == "block" {
+                                    let block = fc.node();
+                                    extract_stmt(emitter, file_id, &block, source, callable_id, stmt_id, catch_idx);
+                                    catch_idx += 1;
+                                    break;
+                                }
+                                if !fc.goto_next_sibling() { break; }
+                            }
+                        }
                     }
                     if !cursor.goto_next_sibling() { break; }
                 }
