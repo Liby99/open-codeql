@@ -245,8 +245,17 @@ exprparents(
     int parent_id: @element ref
 );
 
-/* Literal value text */
+/* Literal value text. Matches vendor semmlecode.cpp.dbscheme: only literal /
+ * constant-valued expressions get a row here (variable/function access names
+ * are recorded in accessname below, an ocodeql-internal table). */
 valuetext(
+    unique int id: @expr ref,
+    string text: string ref
+);
+
+/* Access name: the identifier text of a variable/function/field access.
+ * ocodeql-internal (no vendor counterpart), used to resolve funbind. */
+accessname(
     unique int id: @expr ref,
     string text: string ref
 );

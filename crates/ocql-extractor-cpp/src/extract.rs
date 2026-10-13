@@ -41,6 +41,7 @@ const USERTYPE_STRUCT: i64 = 1;
 const USERTYPE_CLASS: i64 = 2;
 const USERTYPE_UNION: i64 = 3;
 const USERTYPE_ENUM: i64 = 4;
+const USERTYPE_ALIAS: i64 = 18;
 
 // Statement kind constants (matches semmlecode.cpp.dbscheme)
 const STMT_EXPR: i64 = 1;
@@ -58,58 +59,56 @@ const STMT_DECL: i64 = 17;
 const STMT_CONTINUE: i64 = 27;
 const STMT_BREAK: i64 = 28;
 
-// Expression kind constants (matches semmlecode.cpp.dbscheme)
-const EXPR_ADDRESS_OF: i64 = 2;
-const EXPR_INDIRECT: i64 = 4;
-const EXPR_PAREXPR: i64 = 12;
-const EXPR_LOGNOT: i64 = 13;
-const EXPR_BITNOT: i64 = 14;
-const EXPR_UNARYMINUS: i64 = 15;
-const EXPR_UNARYPLUS: i64 = 16;
-const EXPR_PREFIXINC: i64 = 20;
-const EXPR_PREFIXDEC: i64 = 21;
-const EXPR_POSTFIXINC: i64 = 22;
-const EXPR_POSTFIXDEC: i64 = 23;
-const EXPR_CONDITIONAL: i64 = 24;
-const EXPR_ADD: i64 = 25;
-const EXPR_SUB: i64 = 26;
-const EXPR_MUL: i64 = 27;
-const EXPR_DIV: i64 = 28;
-const EXPR_REM: i64 = 29;
-const EXPR_BITAND: i64 = 39;
-const EXPR_BITOR: i64 = 40;
-const EXPR_BITXOR: i64 = 41;
-const EXPR_LSHIFT: i64 = 42;
-const EXPR_RSHIFT: i64 = 43;
-const EXPR_EQ: i64 = 44;
-const EXPR_NE: i64 = 45;
-const EXPR_LT: i64 = 46;
-const EXPR_GT: i64 = 47;
-const EXPR_LE: i64 = 48;
-const EXPR_GE: i64 = 49;
-const EXPR_ASSIGN: i64 = 52;
-const EXPR_ASSIGNADD: i64 = 53;
-const EXPR_ASSIGNSUB: i64 = 54;
-const EXPR_ASSIGNMUL: i64 = 55;
-const EXPR_ASSIGNDIV: i64 = 56;
-const EXPR_ASSIGNREM: i64 = 57;
-const EXPR_ASSIGNAND: i64 = 58;
-const EXPR_ASSIGNOR: i64 = 59;
-const EXPR_ASSIGNXOR: i64 = 60;
-const EXPR_ASSIGNLSHIFT: i64 = 61;
-const EXPR_ASSIGNRSHIFT: i64 = 62;
-const EXPR_LOGAND: i64 = 65;
-const EXPR_LOGOR: i64 = 66;
-const EXPR_COMMA: i64 = 67;
-const EXPR_SUBSCRIPT: i64 = 68;
-const EXPR_CALL: i64 = 74;
-const EXPR_VARACCESS: i64 = 84;
-#[allow(dead_code)]
-const EXPR_ROUTINEEXPR: i64 = 97;
-const EXPR_SIZEOF: i64 = 93;
-const EXPR_LITERAL: i64 = 140;
-const EXPR_CAST: i64 = 141;
-const EXPR_FIELD_ACCESS: i64 = 142;
+// Expression kind constants — match `case @expr.kind of` in
+// vendor/codeql/cpp/ql/lib/semmlecode.cpp.dbscheme.
+const EXPR_ADDRESS_OF: i64 = 2;       // @address_of
+const EXPR_INDIRECT: i64 = 4;          // @indirect
+const EXPR_UNARYMINUS: i64 = 13;       // @arithnegexpr (unary -)
+const EXPR_UNARYPLUS: i64 = 14;        // @unaryplusexpr
+const EXPR_BITNOT: i64 = 15;           // @complementexpr (~)
+const EXPR_LOGNOT: i64 = 16;           // @notexpr (!)
+const EXPR_POSTFIXINC: i64 = 20;       // @postincrexpr
+const EXPR_POSTFIXDEC: i64 = 21;       // @postdecrexpr
+const EXPR_PREFIXINC: i64 = 22;        // @preincrexpr
+const EXPR_PREFIXDEC: i64 = 23;        // @predecrexpr
+const EXPR_CONDITIONAL: i64 = 24;      // @conditionalexpr
+const EXPR_ADD: i64 = 25;              // @addexpr
+const EXPR_SUB: i64 = 26;              // @subexpr
+const EXPR_MUL: i64 = 27;              // @mulexpr
+const EXPR_DIV: i64 = 28;              // @divexpr
+const EXPR_REM: i64 = 29;              // @remexpr
+const EXPR_LSHIFT: i64 = 39;           // @lshiftexpr
+const EXPR_RSHIFT: i64 = 40;           // @rshiftexpr
+const EXPR_BITAND: i64 = 41;           // @andexpr
+const EXPR_BITOR: i64 = 42;            // @orexpr
+const EXPR_BITXOR: i64 = 43;           // @xorexpr
+const EXPR_EQ: i64 = 44;               // @eqexpr
+const EXPR_NE: i64 = 45;               // @neexpr
+const EXPR_GT: i64 = 46;               // @gtexpr
+const EXPR_LT: i64 = 47;               // @ltexpr
+const EXPR_GE: i64 = 48;               // @geexpr
+const EXPR_LE: i64 = 49;               // @leexpr
+const EXPR_ASSIGN: i64 = 52;           // @assignexpr
+const EXPR_ASSIGNADD: i64 = 53;        // @assignaddexpr
+const EXPR_ASSIGNSUB: i64 = 54;        // @assignsubexpr
+const EXPR_ASSIGNMUL: i64 = 55;        // @assignmulexpr
+const EXPR_ASSIGNDIV: i64 = 56;        // @assigndivexpr
+const EXPR_ASSIGNREM: i64 = 57;        // @assignremexpr
+const EXPR_ASSIGNLSHIFT: i64 = 58;     // @assignlshiftexpr
+const EXPR_ASSIGNRSHIFT: i64 = 59;     // @assignrshiftexpr
+const EXPR_ASSIGNAND: i64 = 60;        // @assignandexpr
+const EXPR_ASSIGNOR: i64 = 61;         // @assignorexpr
+const EXPR_ASSIGNXOR: i64 = 62;        // @assignxorexpr
+const EXPR_LOGAND: i64 = 65;           // @andlogicalexpr
+const EXPR_LOGOR: i64 = 66;            // @orlogicalexpr
+const EXPR_COMMA: i64 = 67;            // @commaexpr
+const EXPR_SUBSCRIPT: i64 = 68;        // @subscriptexpr
+const EXPR_VARACCESS: i64 = 84;        // @varaccess (also covers field accesses)
+const EXPR_SIZEOF: i64 = 93;           // @runtime_sizeof
+const EXPR_CALL: i64 = 97;             // @routineexpr (modern; iscall row distinguishes call vs ref)
+const EXPR_LITERAL: i64 = 123;         // @literal
+const EXPR_CAST: i64 = 214;            // @c_style_cast
+const EXPR_FIELD_ACCESS: i64 = 84;     // field accesses share @varaccess kind
 
 impl Extractor for CppExtractor {
     fn language(&self) -> Language {
@@ -161,7 +160,10 @@ fn resolve_call_bindings(emitter: &mut FactEmitter<'_>) {
         return;
     }
 
-    // Step 2: For each call, find the child expression at index 0 (callee identifier)
+    // Step 2: For each call, find the child expression at index 0 (callee
+    // identifier). Plain-identifier callees no longer get a child @varaccess —
+    // their name lives on the call node itself (see extract_expr) — but complex
+    // callees (function pointers, member access) still recurse to a child.
     let callee_of_call: HashMap<EntityId, EntityId> = emitter.db.scan("exprparents")
         .into_iter()
         .flatten()
@@ -176,14 +178,16 @@ fn resolve_call_bindings(emitter: &mut FactEmitter<'_>) {
         })
         .collect();
 
-    // Step 3: Get valuetext for each callee entity
-    let callee_entity_ids: HashSet<EntityId> = callee_of_call.values().copied().collect();
-    let valuetext_map: HashMap<EntityId, Value> = emitter.db.scan("valuetext")
+    // Step 3: Get the access name for each call node and each callee child
+    // entity. Both live in the `accessname` table.
+    let mut name_lookup_ids: HashSet<EntityId> = callee_of_call.values().copied().collect();
+    name_lookup_ids.extend(call_ids.iter().copied());
+    let accessname_map: HashMap<EntityId, Value> = emitter.db.scan("accessname")
         .into_iter()
         .flatten()
         .filter_map(|t| {
             if let Value::Entity(id) = &t[0] {
-                if callee_entity_ids.contains(id) {
+                if name_lookup_ids.contains(id) {
                     return Some((*id, t[1].clone()));
                 }
             }
@@ -203,10 +207,14 @@ fn resolve_call_bindings(emitter: &mut FactEmitter<'_>) {
         })
         .collect();
 
-    // Step 5: Resolve and collect funbind pairs
+    // Step 5: Resolve and collect funbind pairs. Prefer the name recorded on
+    // the call node (plain-identifier callee); fall back to the child callee.
     let mut bindings = Vec::new();
-    for (&call_id, &callee_id) in &callee_of_call {
-        if let Some(name_val) = valuetext_map.get(&callee_id) {
+    for &call_id in &call_ids {
+        let name_val = accessname_map.get(&call_id).or_else(|| {
+            callee_of_call.get(&call_id).and_then(|cid| accessname_map.get(cid))
+        });
+        if let Some(name_val) = name_val {
             if let Some(&func_id) = func_map.get(name_val) {
                 bindings.push((call_id, func_id));
             }
@@ -727,16 +735,6 @@ fn extract_type_specifier(
     extract_type_specifier_impl(emitter, file_id, node, source, None);
 }
 
-fn extract_type_specifier_with_name(
-    emitter: &mut FactEmitter<'_>,
-    file_id: EntityId,
-    node: &Node<'_>,
-    source: &[u8],
-    name_override: &str,
-) {
-    extract_type_specifier_impl(emitter, file_id, node, source, Some(name_override));
-}
-
 fn extract_type_specifier_impl(
     emitter: &mut FactEmitter<'_>,
     file_id: EntityId,
@@ -774,7 +772,7 @@ fn extract_type_specifier_impl(
     let type_id = emitter.alloc();
     let loc_id = LocationEmitter::emit_for_node(emitter, file_id, node);
 
-    let name_val = emitter.string(if effective_name.is_empty() { "<anonymous>" } else { &effective_name });
+    let name_val = emitter.string(if effective_name.is_empty() { "(unnamed class/struct/union)" } else { &effective_name });
     emitter.emit("usertypes", vec![
         Value::Entity(type_id),
         name_val,
@@ -1275,25 +1273,37 @@ fn extract_typedef(
         name.unwrap_or_default()
     };
 
-    // Extract the underlying type specifier
+    // Extract the underlying type specifier. Vendor's clang frontend records
+    // typedef-of-anonymous-struct as TWO usertype rows: the anonymous struct
+    // itself (kind 1/3/4 with name "(unnamed class/struct/union)") plus a
+    // separate alias row (kind 18) for the typedef name. We mirror that.
     let mut cursor = node.walk();
     if cursor.goto_first_child() {
         loop {
             let child = cursor.node();
             match child.kind() {
                 "struct_specifier" | "class_specifier" | "union_specifier" | "enum_specifier" => {
-                    if typedef_name.is_empty() {
-                        extract_type_specifier(emitter, file_id, &child, source);
-                    } else {
-                        extract_type_specifier_with_name(
-                            emitter, file_id, &child, source, &typedef_name,
-                        );
-                    }
+                    extract_type_specifier(emitter, file_id, &child, source);
                 }
                 _ => {}
             }
             if !cursor.goto_next_sibling() { break; }
         }
+    }
+
+    if !typedef_name.is_empty() {
+        let alias_id = emitter.alloc();
+        let loc_id = LocationEmitter::emit_for_node(emitter, file_id, node);
+        let name_val = emitter.string(&typedef_name);
+        emitter.emit("usertypes", vec![
+            Value::Entity(alias_id),
+            name_val,
+            Value::Int(USERTYPE_ALIAS),
+        ]);
+        emitter.emit("element_location", vec![
+            Value::Entity(alias_id),
+            Value::Entity(loc_id),
+        ]);
     }
 }
 
@@ -1512,9 +1522,23 @@ fn extract_stmt(
             }
         }
         "for_statement" => {
-            // initializer, condition, update are children
+            // initializer, condition, update are children. A declaration
+            // initializer (`for (int i = 0; ...)`) is recorded by CodeQL as a
+            // @stmt_decl child, not an expression — match that.
             if let Some(init) = node.child_by_field("initializer") {
-                extract_expr(emitter, file_id, &init, source, stmt_id, 0, enclosing_func);
+                if init.kind() == "declaration" {
+                    if let Some(init_id) = extract_stmt_or_expr_child(
+                        emitter, file_id, &init, source, enclosing_func,
+                    ) {
+                        emitter.emit("stmtparents", vec![
+                            Value::Entity(init_id),
+                            Value::Int(0),
+                            Value::Entity(stmt_id),
+                        ]);
+                    }
+                } else {
+                    extract_expr(emitter, file_id, &init, source, stmt_id, 0, enclosing_func);
+                }
             }
             if let Some(cond) = node.child_by_field("condition") {
                 extract_expr(emitter, file_id, &cond, source, stmt_id, 1, enclosing_func);
@@ -1656,12 +1680,29 @@ fn extract_expr(
     child_index: i64,
     enclosing_func: EntityId,
 ) -> Option<EntityId> {
+    // Vendor's clang frontend strips parentheses — descend into the inner
+    // expression so we don't emit a @parexpr wrapper that codeql doesn't have.
+    if node.kind() == "parenthesized_expression" {
+        let mut cursor = node.walk();
+        if cursor.goto_first_child() {
+            loop {
+                let child = cursor.node();
+                if child.is_named() {
+                    return extract_expr(
+                        emitter, file_id, &child, source, parent_id, child_index, enclosing_func,
+                    );
+                }
+                if !cursor.goto_next_sibling() { break; }
+            }
+        }
+        return None;
+    }
+
     let kind = match node.kind() {
         "number_literal" | "string_literal" | "char_literal" | "true" | "false" | "null"
         | "string_content" | "concatenated_string" => Some(EXPR_LITERAL),
         "identifier" => Some(EXPR_VARACCESS),
         "call_expression" => Some(EXPR_CALL),
-        "parenthesized_expression" => Some(EXPR_PAREXPR),
         "conditional_expression" => Some(EXPR_CONDITIONAL),
         "subscript_expression" => Some(EXPR_SUBSCRIPT),
         "comma_expression" => Some(EXPR_COMMA),
@@ -1737,11 +1778,32 @@ fn extract_expr(
         Value::Entity(enclosing_func),
     ]);
 
-    // Value text: literal values and identifier names
-    if expr_kind == EXPR_LITERAL || expr_kind == EXPR_VARACCESS || expr_kind == EXPR_FIELD_ACCESS {
-        let text = node.text(source);
+    // Value text. Vendor's `valuetext` records only literal / constant-valued
+    // expressions, so only @literal goes there. Variable/function/field access
+    // names go to the ocodeql-internal `accessname` table (used by funbind).
+    if expr_kind == EXPR_LITERAL {
+        let raw = node.text(source);
+        // CodeQL stores string-literal *content* without the surrounding double
+        // quotes (e.g. `"%s\n"` -> `%s\n`), but keeps char-literal quotes
+        // (`'x'`). Match that so valuetext compares equal.
+        let text = if node.kind() == "string_literal"
+            && raw.len() >= 2
+            && raw.starts_with('"')
+            && raw.ends_with('"')
+        {
+            &raw[1..raw.len() - 1]
+        } else {
+            raw
+        };
         let text_val = emitter.string(text);
         emitter.emit("valuetext", vec![
+            Value::Entity(expr_id),
+            text_val,
+        ]);
+    } else if expr_kind == EXPR_VARACCESS || expr_kind == EXPR_FIELD_ACCESS {
+        let text = node.text(source);
+        let text_val = emitter.string(text);
+        emitter.emit("accessname", vec![
             Value::Entity(expr_id),
             text_val,
         ]);
@@ -1750,16 +1812,30 @@ fn extract_expr(
     // Recurse into child expressions
     match node.kind() {
         "call_expression" => {
-            // Emit iscall(expr_id, 0) — marks this expression as a function call
+            // Emit iscall(expr_id, 0) — marks this expression as a function call.
+            // The call node itself is the @routineexpr (kind 97); CodeQL does not
+            // emit a separate @varaccess for the callee identifier.
             emitter.emit("iscall", vec![
                 Value::Entity(expr_id),
                 Value::Int(0),
             ]);
 
-            // Callee function name (child 0) — extracted as child expression for
-            // backward compatibility, also used for funbind resolution post-pass
+            // Callee. For a plain identifier callee (the common C case), record
+            // its name directly on the call node via `accessname` (no separate
+            // child @varaccess — that would overcount @varaccess vs CodeQL).
+            // For a complex callee (function pointer, member access, etc.),
+            // recurse so the sub-expression is still represented.
             if let Some(func) = node.child_by_field("function") {
-                extract_expr(emitter, file_id, &func, source, expr_id, 0, enclosing_func);
+                if func.kind() == "identifier" {
+                    let text = func.text(source);
+                    let text_val = emitter.string(text);
+                    emitter.emit("accessname", vec![
+                        Value::Entity(expr_id),
+                        text_val,
+                    ]);
+                } else {
+                    extract_expr(emitter, file_id, &func, source, expr_id, 0, enclosing_func);
+                }
             }
             // Arguments (children 1+)
             if let Some(args) = node.child_by_field("arguments") {
@@ -1801,18 +1877,6 @@ fn extract_expr(
         "update_expression" => {
             if let Some(arg) = node.child_by_field("argument") {
                 extract_expr(emitter, file_id, &arg, source, expr_id, 0, enclosing_func);
-            }
-        }
-        "parenthesized_expression" => {
-            let mut cursor = node.walk();
-            if cursor.goto_first_child() {
-                loop {
-                    let child = cursor.node();
-                    if child.is_named() {
-                        extract_expr(emitter, file_id, &child, source, expr_id, 0, enclosing_func);
-                    }
-                    if !cursor.goto_next_sibling() { break; }
-                }
             }
         }
         "conditional_expression" => {

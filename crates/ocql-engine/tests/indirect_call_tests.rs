@@ -90,7 +90,7 @@ fn dump_indirect_calls_extraction() {
     dump_table(&db, "params");
     dump_table(&db, "exprs");
     dump_table(&db, "exprparents");
-    dump_table(&db, "valuetext");
+    dump_table(&db, "accessname");
     dump_table(&db, "enclosingfunction");
     eprintln!();
 }
@@ -124,7 +124,7 @@ fn indirect_call_rules() -> Vec<Rule> {
         //   localvariables(var_id, var_name, _),
         //   exprparents(init_expr, 0, var_id),
         //   exprs(init_expr, 84, _),              -- varaccess
-        //   valuetext(init_expr, target),
+        //   accessname(init_expr, target),
         //   functions(_, target, _),               -- target is a function name
         //   enclosingfunction(var_id, fid),
         //   functions(fid, func, _).
@@ -140,7 +140,7 @@ fn indirect_call_rules() -> Vec<Rule> {
                 BodyElement::Positive(Atom::new("exprs", vec![
                     var("init_expr"), int(84), var("_loc"),
                 ])),
-                BodyElement::Positive(Atom::new("valuetext", vec![
+                BodyElement::Positive(Atom::new("accessname", vec![
                     var("init_expr"), var("target"),
                 ])),
                 BodyElement::Positive(Atom::new("functions", vec![
@@ -160,10 +160,10 @@ fn indirect_call_rules() -> Vec<Rule> {
         //   exprs(aid, 52, _),                   -- assignment
         //   exprparents(lv, 0, aid),
         //   exprs(lv, 84, _),
-        //   valuetext(lv, lhs_name),
+        //   accessname(lv, lhs_name),
         //   exprparents(rv, 1, aid),
         //   exprs(rv, 84, _),
-        //   valuetext(rv, target),
+        //   accessname(rv, target),
         //   functions(_, target, _),
         //   enclosingfunction(aid, fid),
         //   functions(fid, func, _).
@@ -173,10 +173,10 @@ fn indirect_call_rules() -> Vec<Rule> {
                 BodyElement::Positive(Atom::new("exprs", vec![var("aid"), int(52), var("_l1")])),
                 BodyElement::Positive(Atom::new("exprparents", vec![var("lv"), int(0), var("aid")])),
                 BodyElement::Positive(Atom::new("exprs", vec![var("lv"), int(84), var("_l2")])),
-                BodyElement::Positive(Atom::new("valuetext", vec![var("lv"), var("lhs_name")])),
+                BodyElement::Positive(Atom::new("accessname", vec![var("lv"), var("lhs_name")])),
                 BodyElement::Positive(Atom::new("exprparents", vec![var("rv"), int(1), var("aid")])),
                 BodyElement::Positive(Atom::new("exprs", vec![var("rv"), int(84), var("_l3")])),
-                BodyElement::Positive(Atom::new("valuetext", vec![var("rv"), var("target")])),
+                BodyElement::Positive(Atom::new("accessname", vec![var("rv"), var("target")])),
                 BodyElement::Positive(Atom::new("functions", vec![
                     var("_target_fid2"), var("target"), var("_tk2"),
                 ])),
@@ -196,7 +196,7 @@ fn indirect_call_rules() -> Vec<Rule> {
         //   exprs(addr_expr, 2, _),               -- address_of (kind 2)
         //   exprparents(operand, 0, addr_expr),
         //   exprs(operand, 84, _),
-        //   valuetext(operand, target),
+        //   accessname(operand, target),
         //   functions(_, target, _),
         //   enclosingfunction(var_id, fid),
         //   functions(fid, func, _).
@@ -218,7 +218,7 @@ fn indirect_call_rules() -> Vec<Rule> {
                 BodyElement::Positive(Atom::new("exprs", vec![
                     var("operand"), int(84), var("_loc4"),
                 ])),
-                BodyElement::Positive(Atom::new("valuetext", vec![
+                BodyElement::Positive(Atom::new("accessname", vec![
                     var("operand"), var("target"),
                 ])),
                 BodyElement::Positive(Atom::new("functions", vec![
@@ -240,12 +240,12 @@ fn indirect_call_rules() -> Vec<Rule> {
                 BodyElement::Positive(Atom::new("exprs", vec![var("aid3"), int(52), var("_l7")])),
                 BodyElement::Positive(Atom::new("exprparents", vec![var("lv3"), int(0), var("aid3")])),
                 BodyElement::Positive(Atom::new("exprs", vec![var("lv3"), int(84), var("_l8")])),
-                BodyElement::Positive(Atom::new("valuetext", vec![var("lv3"), var("lhs_name")])),
+                BodyElement::Positive(Atom::new("accessname", vec![var("lv3"), var("lhs_name")])),
                 BodyElement::Positive(Atom::new("exprparents", vec![var("addr3"), int(1), var("aid3")])),
                 BodyElement::Positive(Atom::new("exprs", vec![var("addr3"), int(2), var("_l9")])),
                 BodyElement::Positive(Atom::new("exprparents", vec![var("op3"), int(0), var("addr3")])),
                 BodyElement::Positive(Atom::new("exprs", vec![var("op3"), int(84), var("_l10")])),
-                BodyElement::Positive(Atom::new("valuetext", vec![var("op3"), var("target")])),
+                BodyElement::Positive(Atom::new("accessname", vec![var("op3"), var("target")])),
                 BodyElement::Positive(Atom::new("functions", vec![
                     var("_target_fid4"), var("target"), var("_tk4"),
                 ])),
@@ -259,11 +259,11 @@ fn indirect_call_rules() -> Vec<Rule> {
         ),
 
         // ---- Direct call ----
+        // A call expression (kind 97, @routineexpr) carries its callee name in
+        // accessname — the extractor records it on the call node itself.
         // direct_call(caller, callee) :-
-        //   exprs(call_id, 74, _),
-        //   exprparents(callee_var, 0, call_id),
-        //   exprs(callee_var, 84, _),
-        //   valuetext(callee_var, callee),
+        //   exprs(call_id, 97, _),
+        //   accessname(call_id, callee),
         //   functions(_, callee, _),              -- callee name IS a function
         //   enclosingfunction(call_id, fid),
         //   functions(fid, caller, _).
@@ -271,16 +271,10 @@ fn indirect_call_rules() -> Vec<Rule> {
             Atom::new("direct_call", vec![var("caller"), var("callee")]),
             vec![
                 BodyElement::Positive(Atom::new("exprs", vec![
-                    var("call_id"), int(74), var("_cl1"),
+                    var("call_id"), int(97), var("_cl1"),
                 ])),
-                BodyElement::Positive(Atom::new("exprparents", vec![
-                    var("callee_var"), int(0), var("call_id"),
-                ])),
-                BodyElement::Positive(Atom::new("exprs", vec![
-                    var("callee_var"), int(84), var("_cl2"),
-                ])),
-                BodyElement::Positive(Atom::new("valuetext", vec![
-                    var("callee_var"), var("callee"),
+                BodyElement::Positive(Atom::new("accessname", vec![
+                    var("call_id"), var("callee"),
                 ])),
                 BodyElement::Positive(Atom::new("functions", vec![
                     var("_callee_fid"), var("callee"), var("_ck"),
@@ -295,11 +289,11 @@ fn indirect_call_rules() -> Vec<Rule> {
         ),
 
         // ---- Indirect call ----
+        // A call through a function pointer looks the same: the call node's
+        // accessname is the pointer variable's name, resolved via points_to.
         // indirect_call(caller, callee) :-
-        //   exprs(call_id, 74, _),
-        //   exprparents(callee_var, 0, call_id),
-        //   exprs(callee_var, 84, _),
-        //   valuetext(callee_var, var_name),
+        //   exprs(call_id, 97, _),
+        //   accessname(call_id, var_name),
         //   points_to(caller, var_name, callee),
         //   enclosingfunction(call_id, fid),
         //   functions(fid, caller, _).
@@ -307,16 +301,10 @@ fn indirect_call_rules() -> Vec<Rule> {
             Atom::new("indirect_call", vec![var("caller"), var("callee")]),
             vec![
                 BodyElement::Positive(Atom::new("exprs", vec![
-                    var("call_id"), int(74), var("_ic1"),
+                    var("call_id"), int(97), var("_ic1"),
                 ])),
-                BodyElement::Positive(Atom::new("exprparents", vec![
-                    var("callee_var"), int(0), var("call_id"),
-                ])),
-                BodyElement::Positive(Atom::new("exprs", vec![
-                    var("callee_var"), int(84), var("_ic2"),
-                ])),
-                BodyElement::Positive(Atom::new("valuetext", vec![
-                    var("callee_var"), var("var_name"),
+                BodyElement::Positive(Atom::new("accessname", vec![
+                    var("call_id"), var("var_name"),
                 ])),
                 BodyElement::Positive(Atom::new("points_to", vec![
                     var("caller"), var("var_name"), var("callee"),

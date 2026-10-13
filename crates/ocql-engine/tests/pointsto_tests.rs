@@ -98,7 +98,7 @@ fn pointsto_rules() -> Vec<Rule> {
         //   localvariables(var_id, var_name, _),
         //   exprparents(init_expr, 0, var_id),
         //   exprs(init_expr, 84, _),              -- varaccess
-        //   valuetext(init_expr, target),
+        //   accessname(init_expr, target),
         //   functions(_, target, _),               -- target is a function name
         //   enclosingfunction(var_id, fid),
         //   functions(fid, func, _).
@@ -114,7 +114,7 @@ fn pointsto_rules() -> Vec<Rule> {
                 BodyElement::Positive(Atom::new("exprs", vec![
                     var("ie"), int(84), var("_l"),
                 ])),
-                BodyElement::Positive(Atom::new("valuetext", vec![
+                BodyElement::Positive(Atom::new("accessname", vec![
                     var("ie"), var("target"),
                 ])),
                 BodyElement::Positive(Atom::new("functions", vec![
@@ -134,8 +134,8 @@ fn pointsto_rules() -> Vec<Rule> {
         // ================================================================
         // base_points_to(func, lhs, target) :-
         //   exprs(aid, 52, _), exprparents(lv, 0, aid), exprs(lv, 84, _),
-        //   valuetext(lv, lhs), exprparents(rv, 1, aid), exprs(rv, 84, _),
-        //   valuetext(rv, target), functions(_, target, _),
+        //   accessname(lv, lhs), exprparents(rv, 1, aid), exprs(rv, 84, _),
+        //   accessname(rv, target), functions(_, target, _),
         //   enclosingfunction(aid, fid), functions(fid, func, _).
         Rule::new(
             Atom::new("base_points_to", vec![var("func"), var("lhs"), var("target")]),
@@ -143,10 +143,10 @@ fn pointsto_rules() -> Vec<Rule> {
                 BodyElement::Positive(Atom::new("exprs", vec![var("aid"), int(52), var("_l1")])),
                 BodyElement::Positive(Atom::new("exprparents", vec![var("lv"), int(0), var("aid")])),
                 BodyElement::Positive(Atom::new("exprs", vec![var("lv"), int(84), var("_l2")])),
-                BodyElement::Positive(Atom::new("valuetext", vec![var("lv"), var("lhs")])),
+                BodyElement::Positive(Atom::new("accessname", vec![var("lv"), var("lhs")])),
                 BodyElement::Positive(Atom::new("exprparents", vec![var("rv"), int(1), var("aid")])),
                 BodyElement::Positive(Atom::new("exprs", vec![var("rv"), int(84), var("_l3")])),
-                BodyElement::Positive(Atom::new("valuetext", vec![var("rv"), var("target")])),
+                BodyElement::Positive(Atom::new("accessname", vec![var("rv"), var("target")])),
                 BodyElement::Positive(Atom::new("functions", vec![
                     var("_tf2"), var("target"), var("_tk2"),
                 ])),
@@ -180,7 +180,7 @@ fn pointsto_rules() -> Vec<Rule> {
                 BodyElement::Positive(Atom::new("exprs", vec![
                     var("op"), int(84), var("_l5"),
                 ])),
-                BodyElement::Positive(Atom::new("valuetext", vec![
+                BodyElement::Positive(Atom::new("accessname", vec![
                     var("op"), var("target"),
                 ])),
                 BodyElement::Positive(Atom::new("functions", vec![
@@ -204,12 +204,12 @@ fn pointsto_rules() -> Vec<Rule> {
                 BodyElement::Positive(Atom::new("exprs", vec![var("aid3"), int(52), var("_l6")])),
                 BodyElement::Positive(Atom::new("exprparents", vec![var("lv3"), int(0), var("aid3")])),
                 BodyElement::Positive(Atom::new("exprs", vec![var("lv3"), int(84), var("_l7")])),
-                BodyElement::Positive(Atom::new("valuetext", vec![var("lv3"), var("lhs")])),
+                BodyElement::Positive(Atom::new("accessname", vec![var("lv3"), var("lhs")])),
                 BodyElement::Positive(Atom::new("exprparents", vec![var("aoe3"), int(1), var("aid3")])),
                 BodyElement::Positive(Atom::new("exprs", vec![var("aoe3"), int(2), var("_l8")])),
                 BodyElement::Positive(Atom::new("exprparents", vec![var("op3"), int(0), var("aoe3")])),
                 BodyElement::Positive(Atom::new("exprs", vec![var("op3"), int(84), var("_l9")])),
-                BodyElement::Positive(Atom::new("valuetext", vec![var("op3"), var("target")])),
+                BodyElement::Positive(Atom::new("accessname", vec![var("op3"), var("target")])),
                 BodyElement::Positive(Atom::new("functions", vec![
                     var("_tf4"), var("target"), var("_tk4"),
                 ])),
@@ -229,7 +229,7 @@ fn pointsto_rules() -> Vec<Rule> {
         //   localvariables(dst_id, dst, _),
         //   exprparents(ie, 0, dst_id),
         //   exprs(ie, 84, _),
-        //   valuetext(ie, src),
+        //   accessname(ie, src),
         //   localvariables(_, src, _),  -- src is also a local variable (not a function)
         //   enclosingfunction(dst_id, fid),
         //   functions(fid, func, _).
@@ -245,7 +245,7 @@ fn pointsto_rules() -> Vec<Rule> {
                 BodyElement::Positive(Atom::new("exprs", vec![
                     var("ie2"), int(84), var("_cl1"),
                 ])),
-                BodyElement::Positive(Atom::new("valuetext", vec![
+                BodyElement::Positive(Atom::new("accessname", vec![
                     var("ie2"), var("src"),
                 ])),
                 // Ensure src is a local variable in the same function
@@ -269,8 +269,8 @@ fn pointsto_rules() -> Vec<Rule> {
         // ================================================================
         // var_copy(func, dst, src) :-
         //   exprs(aid, 52, _), exprparents(lv, 0, aid), exprs(lv, 84, _),
-        //   valuetext(lv, dst), exprparents(rv, 1, aid), exprs(rv, 84, _),
-        //   valuetext(rv, src),
+        //   accessname(lv, dst), exprparents(rv, 1, aid), exprs(rv, 84, _),
+        //   accessname(rv, src),
         //   localvariables(_, src, _),   -- src is a local var
         //   enclosingfunction(aid, fid), functions(fid, func, _).
         Rule::new(
@@ -279,10 +279,10 @@ fn pointsto_rules() -> Vec<Rule> {
                 BodyElement::Positive(Atom::new("exprs", vec![var("ca"), int(52), var("_cl2")])),
                 BodyElement::Positive(Atom::new("exprparents", vec![var("clv"), int(0), var("ca")])),
                 BodyElement::Positive(Atom::new("exprs", vec![var("clv"), int(84), var("_cl3")])),
-                BodyElement::Positive(Atom::new("valuetext", vec![var("clv"), var("dst")])),
+                BodyElement::Positive(Atom::new("accessname", vec![var("clv"), var("dst")])),
                 BodyElement::Positive(Atom::new("exprparents", vec![var("crv"), int(1), var("ca")])),
                 BodyElement::Positive(Atom::new("exprs", vec![var("crv"), int(84), var("_cl4")])),
-                BodyElement::Positive(Atom::new("valuetext", vec![var("crv"), var("src")])),
+                BodyElement::Positive(Atom::new("accessname", vec![var("crv"), var("src")])),
                 // src must be a local variable in the same function
                 BodyElement::Positive(Atom::new("localvariables", vec![
                     var("csid"), var("src"), var("_cst"),
@@ -331,35 +331,27 @@ fn pointsto_rules() -> Vec<Rule> {
         // PARAMETER BINDING: at call sites, map actual args to formal params
         // ================================================================
         // param_points_to(callee_name, param_name, target) :-
-        //   exprs(call_id, 74, _),                     -- call expression
-        //   exprparents(callee_var, 0, call_id),        -- child 0 = function name
-        //   exprs(callee_var, 84, _),
-        //   valuetext(callee_var, callee_name),
+        //   exprs(call_id, 97, _),                     -- call expression
+        //   accessname(call_id, callee_name),           -- callee name on the call node
         //   functions(callee_fid, callee_name, _),      -- callee is a real function
         //   params(callee_fid, idx, param_name, _),     -- formal param at idx
         //   actual_idx = idx + 1,                       -- actual args start at child 1
         //   exprparents(arg_expr, actual_idx, call_id), -- actual argument
         //   exprs(arg_expr, 84, _),                     -- it's a varaccess
-        //   valuetext(arg_expr, target),
+        //   accessname(arg_expr, target),
         //   functions(_, target, _).                    -- the argument is a function name
         //
-        // NOTE: In our extracted call expressions, child 0 is the callee name,
-        // and children 1, 2, ... are the arguments. So param at index 0 maps to
-        // child 1 of the call, param at index 1 maps to child 2, etc.
+        // NOTE: In our extracted call expressions, the callee name lives in
+        // accessname on the call node, and children 1, 2, ... are the arguments.
+        // So param at index 0 maps to child 1, param at index 1 to child 2, etc.
         Rule::new(
             Atom::new("param_points_to", vec![var("callee_name"), var("pname"), var("target")]),
             vec![
                 BodyElement::Positive(Atom::new("exprs", vec![
-                    var("cid"), int(74), var("_p1"),
+                    var("cid"), int(97), var("_p1"),
                 ])),
-                BodyElement::Positive(Atom::new("exprparents", vec![
-                    var("cv"), int(0), var("cid"),
-                ])),
-                BodyElement::Positive(Atom::new("exprs", vec![
-                    var("cv"), int(84), var("_p2"),
-                ])),
-                BodyElement::Positive(Atom::new("valuetext", vec![
-                    var("cv"), var("callee_name"),
+                BodyElement::Positive(Atom::new("accessname", vec![
+                    var("cid"), var("callee_name"),
                 ])),
                 BodyElement::Positive(Atom::new("functions", vec![
                     var("cfid"), var("callee_name"), var("_p3"),
@@ -374,7 +366,7 @@ fn pointsto_rules() -> Vec<Rule> {
                 BodyElement::Positive(Atom::new("exprs", vec![
                     var("arg"), int(84), var("_p4"),
                 ])),
-                BodyElement::Positive(Atom::new("valuetext", vec![
+                BodyElement::Positive(Atom::new("accessname", vec![
                     var("arg"), var("target"),
                 ])),
                 BodyElement::Positive(Atom::new("functions", vec![
@@ -404,16 +396,10 @@ fn pointsto_rules() -> Vec<Rule> {
             Atom::new("indirect_call", vec![var("caller"), var("callee")]),
             vec![
                 BodyElement::Positive(Atom::new("exprs", vec![
-                    var("cid"), int(74), var("_ic1"),
+                    var("cid"), int(97), var("_ic1"),
                 ])),
-                BodyElement::Positive(Atom::new("exprparents", vec![
-                    var("cv"), int(0), var("cid"),
-                ])),
-                BodyElement::Positive(Atom::new("exprs", vec![
-                    var("cv"), int(84), var("_ic2"),
-                ])),
-                BodyElement::Positive(Atom::new("valuetext", vec![
-                    var("cv"), var("vname"),
+                BodyElement::Positive(Atom::new("accessname", vec![
+                    var("cid"), var("vname"),
                 ])),
                 BodyElement::Positive(Atom::new("points_to", vec![
                     var("caller"), var("vname"), var("callee"),

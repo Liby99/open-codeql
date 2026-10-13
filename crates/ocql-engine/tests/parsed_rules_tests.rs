@@ -57,10 +57,8 @@ fn parsed_callgraph_direct_calls() {
     let mut program = parse_program(r#"
         // Direct call graph resolution
         direct_call(caller_name, callee_name) :-
-            exprs(call_id, 74, _loc1),
-            exprparents(callee_var, 0, call_id),
-            exprs(callee_var, 84, _loc2),
-            valuetext(callee_var, callee_name),
+            exprs(call_id, 97, _loc1),
+            accessname(call_id, callee_name),
             enclosingfunction(call_id, caller_func),
             functions(caller_func, caller_name, _kind).
     "#).unwrap();
@@ -84,10 +82,8 @@ fn parsed_callgraph_transitive() {
 
     let mut program = parse_program(r#"
         direct_call(caller_name, callee_name) :-
-            exprs(call_id, 74, _loc1),
-            exprparents(callee_var, 0, call_id),
-            exprs(callee_var, 84, _loc2),
-            valuetext(callee_var, callee_name),
+            exprs(call_id, 97, _loc1),
+            accessname(call_id, callee_name),
             enclosingfunction(call_id, caller_func),
             functions(caller_func, caller_name, _kind).
 
@@ -142,10 +138,8 @@ fn parsed_negation() {
 
     let mut program = parse_program(r#"
         direct_call(caller_name, callee_name) :-
-            exprs(call_id, 74, _loc1),
-            exprparents(callee_var, 0, call_id),
-            exprs(callee_var, 84, _loc2),
-            valuetext(callee_var, callee_name),
+            exprs(call_id, 97, _loc1),
+            accessname(call_id, callee_name),
             enclosingfunction(call_id, caller_func),
             functions(caller_func, caller_name, _kind).
 

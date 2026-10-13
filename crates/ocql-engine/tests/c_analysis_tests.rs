@@ -86,21 +86,17 @@ fn callgraph_direct_calls() {
 
     // Schema reminder:
     //   functions(id, name, kind)
-    //   exprs(id, kind, location)          -- kind 74 = call
-    //   exprparents(expr_id, child_index, parent_id)
-    //   valuetext(id, text)                -- name of identifier/varaccess
+    //   exprs(id, kind, location)          -- kind 97 = call (@routineexpr)
+    //   accessname(id, name)               -- name of identifier/varaccess/callee
     //   enclosingfunction(child, parent)
     //
     // Call graph resolution:
-    //   A call expression (kind=74) has child 0 = the function identifier (kind=84, varaccess).
-    //   The valuetext of that identifier is the callee name.
+    //   A call expression (kind=97) carries its callee name in accessname.
     //   The enclosingfunction of the call expr gives us the caller function.
     //
     // direct_call(caller_name, callee_name) :-
-    //   exprs(call_id, 74, _),                    -- call expression
-    //   exprparents(callee_var, 0, call_id),       -- child 0 = function name
-    //   exprs(callee_var, 84, _),                  -- it's a varaccess
-    //   valuetext(callee_var, callee_name),         -- get callee name
+    //   exprs(call_id, 97, _),                    -- call expression
+    //   accessname(call_id, callee_name),          -- get callee name
     //   enclosingfunction(call_id, caller_func),   -- get enclosing function
     //   functions(caller_func, caller_name, _).     -- get caller name
 
@@ -108,21 +104,13 @@ fn callgraph_direct_calls() {
         Rule::new(
             Atom::new("direct_call", vec![var("caller_name"), var("callee_name")]),
             vec![
-                // call_id is a call expression (kind 74)
+                // call_id is a call expression (kind 97)
                 BodyElement::Positive(Atom::new("exprs", vec![
-                    var("call_id"), int(74), var("_loc1"),
+                    var("call_id"), int(97), var("_loc1"),
                 ])),
-                // child 0 of call is the callee identifier
-                BodyElement::Positive(Atom::new("exprparents", vec![
-                    var("callee_var"), int(0), var("call_id"),
-                ])),
-                // callee_var is a varaccess (kind 84)
-                BodyElement::Positive(Atom::new("exprs", vec![
-                    var("callee_var"), int(84), var("_loc2"),
-                ])),
-                // get the callee name from valuetext
-                BodyElement::Positive(Atom::new("valuetext", vec![
-                    var("callee_var"), var("callee_name"),
+                // the callee name is recorded on the call node itself
+                BodyElement::Positive(Atom::new("accessname", vec![
+                    var("call_id"), var("callee_name"),
                 ])),
                 // get enclosing function of the call
                 BodyElement::Positive(Atom::new("enclosingfunction", vec![
@@ -170,16 +158,10 @@ fn callgraph_transitive() {
             Atom::new("direct_call", vec![var("caller_name"), var("callee_name")]),
             vec![
                 BodyElement::Positive(Atom::new("exprs", vec![
-                    var("call_id"), int(74), var("_loc1"),
+                    var("call_id"), int(97), var("_loc1"),
                 ])),
-                BodyElement::Positive(Atom::new("exprparents", vec![
-                    var("callee_var"), int(0), var("call_id"),
-                ])),
-                BodyElement::Positive(Atom::new("exprs", vec![
-                    var("callee_var"), int(84), var("_loc2"),
-                ])),
-                BodyElement::Positive(Atom::new("valuetext", vec![
-                    var("callee_var"), var("callee_name"),
+                BodyElement::Positive(Atom::new("accessname", vec![
+                    var("call_id"), var("callee_name"),
                 ])),
                 BodyElement::Positive(Atom::new("enclosingfunction", vec![
                     var("call_id"), var("caller_func"),
@@ -241,7 +223,7 @@ fn callgraph_transitive() {
 /// Two sources of variable-to-variable flow:
 /// 1. Assignment: `y = x` → assignment expr (kind=52), child 0=LHS varaccess, child 1=RHS varaccess
 /// 2. Declaration init: `int b = a` → localvariables(var_id, "b", _), init expr parented to var_id
-///    is a varaccess with valuetext "a"
+///    is a varaccess with accessname "a"
 fn dataflow_rules() -> Vec<Rule> {
     vec![
         // Source 1: assignment expression (kind 52)
@@ -254,8 +236,8 @@ fn dataflow_rules() -> Vec<Rule> {
                 BodyElement::Positive(Atom::new("exprparents", vec![var("rv"), int(1), var("aid")])),
                 BodyElement::Positive(Atom::new("exprs", vec![var("lv"), int(84), var("_l2")])),
                 BodyElement::Positive(Atom::new("exprs", vec![var("rv"), int(84), var("_l3")])),
-                BodyElement::Positive(Atom::new("valuetext", vec![var("lv"), var("lhs")])),
-                BodyElement::Positive(Atom::new("valuetext", vec![var("rv"), var("rhs")])),
+                BodyElement::Positive(Atom::new("accessname", vec![var("lv"), var("lhs")])),
+                BodyElement::Positive(Atom::new("accessname", vec![var("rv"), var("rhs")])),
                 BodyElement::Positive(Atom::new("enclosingfunction", vec![var("aid"), var("fid")])),
                 BodyElement::Positive(Atom::new("functions", vec![var("fid"), var("func"), var("_k")])),
             ],
@@ -265,7 +247,7 @@ fn dataflow_rules() -> Vec<Rule> {
         //   localvariables(var_id, var_name, _),
         //   exprparents(init_expr, 0, var_id),       -- init expr parented to the var
         //   exprs(init_expr, 84, _),                  -- init is a varaccess
-        //   valuetext(init_expr, init_name),
+        //   accessname(init_expr, init_name),
         //   enclosingfunction(var_id, fid),
         //   functions(fid, func, _).
         Rule::new(
@@ -280,7 +262,7 @@ fn dataflow_rules() -> Vec<Rule> {
                 BodyElement::Positive(Atom::new("exprs", vec![
                     var("init_expr"), int(84), var("_loc"),
                 ])),
-                BodyElement::Positive(Atom::new("valuetext", vec![
+                BodyElement::Positive(Atom::new("accessname", vec![
                     var("init_expr"), var("init_name"),
                 ])),
                 BodyElement::Positive(Atom::new("enclosingfunction", vec![
@@ -298,7 +280,7 @@ fn dataflow_rules() -> Vec<Rule> {
         //   exprparents(init_expr, 0, var_id),
         //   exprparents(operand, _, init_expr),       -- child of init expr
         //   exprs(operand, 84, _),                    -- operand is a varaccess
-        //   valuetext(operand, operand_name),
+        //   accessname(operand, operand_name),
         //   enclosingfunction(var_id, fid),
         //   functions(fid, func, _).
         Rule::new(
@@ -316,7 +298,7 @@ fn dataflow_rules() -> Vec<Rule> {
                 BodyElement::Positive(Atom::new("exprs", vec![
                     var("operand"), int(84), var("_loc2"),
                 ])),
-                BodyElement::Positive(Atom::new("valuetext", vec![
+                BodyElement::Positive(Atom::new("accessname", vec![
                     var("operand"), var("operand_name"),
                 ])),
                 BodyElement::Positive(Atom::new("enclosingfunction", vec![
@@ -330,9 +312,9 @@ fn dataflow_rules() -> Vec<Rule> {
         // Source 4: assignment with compound RHS (e.g. `y = x + 1`)
         // var_flow(func, lhs, operand_name) :-
         //   exprs(aid, 52, _),
-        //   exprparents(lv, 0, aid), exprs(lv, 84, _), valuetext(lv, lhs),
+        //   exprparents(lv, 0, aid), exprs(lv, 84, _), accessname(lv, lhs),
         //   exprparents(rv, 1, aid),
-        //   exprparents(operand, _, rv), exprs(operand, 84, _), valuetext(operand, operand_name),
+        //   exprparents(operand, _, rv), exprs(operand, 84, _), accessname(operand, operand_name),
         //   enclosingfunction(aid, fid), functions(fid, func, _).
         Rule::new(
             Atom::new("var_flow", vec![var("func"), var("lhs2"), var("operand_name2")]),
@@ -340,11 +322,11 @@ fn dataflow_rules() -> Vec<Rule> {
                 BodyElement::Positive(Atom::new("exprs", vec![var("aid2"), int(52), var("_l4")])),
                 BodyElement::Positive(Atom::new("exprparents", vec![var("lv2"), int(0), var("aid2")])),
                 BodyElement::Positive(Atom::new("exprs", vec![var("lv2"), int(84), var("_l5")])),
-                BodyElement::Positive(Atom::new("valuetext", vec![var("lv2"), var("lhs2")])),
+                BodyElement::Positive(Atom::new("accessname", vec![var("lv2"), var("lhs2")])),
                 BodyElement::Positive(Atom::new("exprparents", vec![var("rv2"), int(1), var("aid2")])),
                 BodyElement::Positive(Atom::new("exprparents", vec![var("op2"), var("_idx2"), var("rv2")])),
                 BodyElement::Positive(Atom::new("exprs", vec![var("op2"), int(84), var("_l6")])),
-                BodyElement::Positive(Atom::new("valuetext", vec![var("op2"), var("operand_name2")])),
+                BodyElement::Positive(Atom::new("accessname", vec![var("op2"), var("operand_name2")])),
                 BodyElement::Positive(Atom::new("enclosingfunction", vec![var("aid2"), var("fid3")])),
                 BodyElement::Positive(Atom::new("functions", vec![var("fid3"), var("func"), var("_k3")])),
             ],
