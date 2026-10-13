@@ -9,6 +9,223 @@ use ocql_extractor_common::tree_sitter::{Language, Node, Tree};
 /// extracted as a declaration in the same file, we reuse the existing entity ID.
 type TypeMap = HashMap<String, EntityId>;
 
+/// Maps simple Java type names → fully-qualified names for the current file.
+/// Built once per file from the file's import list, plus implicit `java.lang.*`
+/// and well-known JDK types from common wildcard packages.
+type ImportMap = HashMap<String, String>;
+
+/// Built-in `java.lang.*` types — always implicitly imported in every Java source.
+const JAVA_LANG_TYPES: &[&str] = &[
+    "String", "Object", "Integer", "Long", "Boolean", "Character",
+    "Byte", "Short", "Double", "Float", "Number", "Throwable",
+    "Exception", "RuntimeException", "Error", "Class", "CharSequence",
+    "Iterable", "Comparable", "Cloneable", "Runnable", "Thread",
+    "ThreadLocal", "StringBuilder", "StringBuffer", "System", "Math",
+    "Enum", "Void", "Process", "ProcessBuilder", "ClassLoader",
+    "NullPointerException", "IllegalArgumentException", "IllegalStateException",
+    "IndexOutOfBoundsException", "ArrayIndexOutOfBoundsException",
+    "ClassCastException", "ArithmeticException", "UnsupportedOperationException",
+    "NumberFormatException", "InterruptedException",
+];
+
+/// Common JDK types known to live in well-known packages, used to disambiguate
+/// wildcard imports like `import java.util.*`. Conservative: only types unlikely
+/// to clash with user code.
+const KNOWN_WILDCARD_TYPES: &[(&str, &str)] = &[
+    // java.util
+    ("List", "java.util.List"),
+    ("ArrayList", "java.util.ArrayList"),
+    ("LinkedList", "java.util.LinkedList"),
+    ("Map", "java.util.Map"),
+    ("HashMap", "java.util.HashMap"),
+    ("LinkedHashMap", "java.util.LinkedHashMap"),
+    ("TreeMap", "java.util.TreeMap"),
+    ("Set", "java.util.Set"),
+    ("HashSet", "java.util.HashSet"),
+    ("LinkedHashSet", "java.util.LinkedHashSet"),
+    ("TreeSet", "java.util.TreeSet"),
+    ("Collection", "java.util.Collection"),
+    ("Collections", "java.util.Collections"),
+    ("Arrays", "java.util.Arrays"),
+    ("Iterator", "java.util.Iterator"),
+    ("Iterable", "java.lang.Iterable"),
+    ("Comparator", "java.util.Comparator"),
+    ("Optional", "java.util.Optional"),
+    ("Objects", "java.util.Objects"),
+    ("Queue", "java.util.Queue"),
+    ("Deque", "java.util.Deque"),
+    ("ArrayDeque", "java.util.ArrayDeque"),
+    ("Properties", "java.util.Properties"),
+    ("Date", "java.util.Date"),
+    ("UUID", "java.util.UUID"),
+    ("Random", "java.util.Random"),
+    ("Scanner", "java.util.Scanner"),
+    ("Stack", "java.util.Stack"),
+    ("Vector", "java.util.Vector"),
+    // java.io
+    ("File", "java.io.File"),
+    ("InputStream", "java.io.InputStream"),
+    ("OutputStream", "java.io.OutputStream"),
+    ("Reader", "java.io.Reader"),
+    ("Writer", "java.io.Writer"),
+    ("BufferedReader", "java.io.BufferedReader"),
+    ("BufferedWriter", "java.io.BufferedWriter"),
+    ("PrintStream", "java.io.PrintStream"),
+    ("PrintWriter", "java.io.PrintWriter"),
+    ("IOException", "java.io.IOException"),
+    ("Serializable", "java.io.Serializable"),
+    // java.nio.file
+    ("Path", "java.nio.file.Path"),
+    ("Paths", "java.nio.file.Paths"),
+    ("Files", "java.nio.file.Files"),
+];
+
+/// Java primitive type names — never qualified.
+const JAVA_PRIMITIVES: &[&str] = &[
+    "boolean", "byte", "short", "int", "long", "float", "double",
+    "char", "void",
+];
+
+/// Pre-scan `root` and collect simple-name → fully-qualified-name mappings
+/// from the file's import declarations. Includes implicit `java.lang.*`.
+fn collect_imports(root: &Node<'_>, source: &[u8]) -> ImportMap {
+    let mut map: ImportMap = HashMap::new();
+
+    // Implicit java.lang.* — always available.
+    for t in JAVA_LANG_TYPES {
+        map.insert(t.to_string(), format!("java.lang.{}", t));
+    }
+
+    // Walk top-level for import_declaration nodes.
+    let mut wildcard_packages: Vec<String> = Vec::new();
+    let mut cursor = root.walk();
+    if cursor.goto_first_child() {
+        loop {
+            let node = cursor.node();
+            if node.kind() == "import_declaration" {
+                let import_text = node.text(source);
+                let is_static = import_text.contains("static ");
+                let is_star = import_text.contains(".*");
+                // Skip static imports for type resolution.
+                if is_static {
+                    if !cursor.goto_next_sibling() { break; }
+                    continue;
+                }
+                let path = import_text
+                    .trim_start_matches("import ")
+                    .trim()
+                    .trim_end_matches(';')
+                    .trim()
+                    .to_string();
+                if is_star {
+                    let pkg = path.trim_end_matches(".*").trim_end_matches('.').to_string();
+                    wildcard_packages.push(pkg);
+                } else {
+                    // Single-type import: java.util.List → simple "List" → fqn
+                    if let Some(simple) = path.rsplit('.').next() {
+                        // Only register if simple name starts with uppercase (a type, not subpackage).
+                        if simple.chars().next().map_or(false, |c| c.is_uppercase()) {
+                            map.insert(simple.to_string(), path.clone());
+                        }
+                    }
+                }
+            }
+            if !cursor.goto_next_sibling() { break; }
+        }
+    }
+
+    // Wildcard imports — conservatively only resolve known JDK types if their
+    // package matches one of the imported wildcard packages.
+    for (simple, fqn) in KNOWN_WILDCARD_TYPES {
+        if map.contains_key(*simple) { continue; }
+        let pkg = fqn.rsplit_once('.').map(|(p, _)| p).unwrap_or("");
+        if wildcard_packages.iter().any(|w| w == pkg) {
+            map.insert(simple.to_string(), fqn.to_string());
+        }
+    }
+
+    map
+}
+
+/// Resolve a parameter type string to its fully-qualified form using `imports`.
+/// Handles arrays (`Foo[]`), generics (`List<Foo>`), and varargs.
+/// Unknown types are left unchanged (as simple names).
+fn qualify_type(ty: &str, imports: &ImportMap) -> String {
+    let ty = ty.trim();
+    if ty.is_empty() { return String::new(); }
+
+    // Strip and recurse on array suffix.
+    if let Some(stripped) = ty.strip_suffix("[]") {
+        return format!("{}[]", qualify_type(stripped, imports));
+    }
+    // Strip and recurse on varargs suffix.
+    if let Some(stripped) = ty.strip_suffix("...") {
+        return format!("{}...", qualify_type(stripped, imports));
+    }
+
+    // Generics: split into base and args, qualify base, recurse on each arg.
+    if let Some(lt_idx) = ty.find('<') {
+        if ty.ends_with('>') {
+            let base = &ty[..lt_idx];
+            let inner = &ty[lt_idx + 1 .. ty.len() - 1];
+            let args = split_generic_args(inner);
+            let qualified_args: Vec<String> = args.iter()
+                .map(|a| qualify_type(a, imports))
+                .collect();
+            return format!("{}<{}>", qualify_type(base, imports), qualified_args.join(", "));
+        }
+    }
+
+    // Primitives — never qualify.
+    if JAVA_PRIMITIVES.iter().any(|p| *p == ty) {
+        return ty.to_string();
+    }
+
+    // Already qualified (contains '.') — leave as-is.
+    if ty.contains('.') {
+        return ty.to_string();
+    }
+
+    // Wildcards in generics: `?`, `? extends X`, `? super X`.
+    if ty == "?" {
+        return "?".to_string();
+    }
+    if let Some(rest) = ty.strip_prefix("? extends ") {
+        return format!("? extends {}", qualify_type(rest, imports));
+    }
+    if let Some(rest) = ty.strip_prefix("? super ") {
+        return format!("? super {}", qualify_type(rest, imports));
+    }
+
+    // Look up simple name in import map.
+    if let Some(fqn) = imports.get(ty) {
+        return fqn.clone();
+    }
+
+    ty.to_string()
+}
+
+/// Split generic arguments at top-level commas (respecting nested `<>`).
+fn split_generic_args(s: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut depth: i32 = 0;
+    let mut start = 0;
+    let bytes = s.as_bytes();
+    for (i, &b) in bytes.iter().enumerate() {
+        match b {
+            b'<' => depth += 1,
+            b'>' => depth -= 1,
+            b',' if depth == 0 => {
+                out.push(s[start..i].trim().to_string());
+                start = i + 1;
+            }
+            _ => {}
+        }
+    }
+    out.push(s[start..].trim().to_string());
+    out
+}
+
 /// Java extractor using tree-sitter.
 ///
 /// Extracts:
@@ -372,12 +589,13 @@ fn extract_program(
     source: &[u8],
 ) {
     let mut type_map = TypeMap::new();
+    let imports = collect_imports(root, source);
     let mut cursor = root.walk();
     if cursor.goto_first_child() {
         loop {
             let node = cursor.node();
             if node.is_named() {
-                extract_top_level(emitter, file_id, &node, source, None, &mut type_map);
+                extract_top_level(emitter, file_id, &node, source, None, &mut type_map, &imports);
             }
             if !cursor.goto_next_sibling() {
                 break;
@@ -395,6 +613,7 @@ fn extract_top_level(
     source: &[u8],
     enclosing_class: Option<EntityId>,
     type_map: &mut TypeMap,
+    imports: &ImportMap,
 ) {
     match node.kind() {
         "package_declaration" => {
@@ -404,16 +623,16 @@ fn extract_top_level(
             extract_import(emitter, file_id, node, source);
         }
         "class_declaration" => {
-            extract_class(emitter, file_id, node, source, false, enclosing_class, type_map);
+            extract_class(emitter, file_id, node, source, false, enclosing_class, type_map, imports);
         }
         "interface_declaration" => {
-            extract_class(emitter, file_id, node, source, true, enclosing_class, type_map);
+            extract_class(emitter, file_id, node, source, true, enclosing_class, type_map, imports);
         }
         "enum_declaration" => {
-            extract_enum(emitter, file_id, node, source, enclosing_class, type_map);
+            extract_enum(emitter, file_id, node, source, enclosing_class, type_map, imports);
         }
         "record_declaration" => {
-            extract_class(emitter, file_id, node, source, false, enclosing_class, type_map);
+            extract_class(emitter, file_id, node, source, false, enclosing_class, type_map, imports);
         }
         "annotation_type_declaration" => {
             extract_annotation_type(emitter, file_id, node, source, enclosing_class, type_map);
@@ -545,6 +764,7 @@ fn extract_class(
     is_interface: bool,
     enclosing_class: Option<EntityId>,
     type_map: &mut TypeMap,
+    imports: &ImportMap,
 ) {
     let name = node.child_by_field("name")
         .map(|n| n.text(source).to_string())
@@ -626,7 +846,7 @@ fn extract_class(
     // Extract body
     if let Some(body) = node.child_by_field("body") {
         let (has_constructor, has_instance_field_init) =
-            extract_class_body(emitter, file_id, class_id, &body, source, type_map);
+            extract_class_body(emitter, file_id, class_id, &body, source, type_map, imports);
 
         // Generate implicit default constructor for classes without explicit ones
         // (interfaces don't get default constructors)
@@ -790,6 +1010,7 @@ fn extract_enum(
     source: &[u8],
     enclosing_class: Option<EntityId>,
     type_map: &mut TypeMap,
+    imports: &ImportMap,
 ) {
     let name = node.child_by_field("name")
         .map(|n| n.text(source).to_string())
@@ -839,7 +1060,7 @@ fn extract_enum(
 
     // Extract enum body
     if let Some(body) = node.child_by_field("body") {
-        extract_enum_body(emitter, file_id, class_id, &body, source, type_map);
+        extract_enum_body(emitter, file_id, class_id, &body, source, type_map, imports);
     }
 
     // Emit compiler-generated valueOf(String) and values() methods
@@ -874,6 +1095,7 @@ fn extract_enum(
         emitter.emit("modifiers", vec![Value::Entity(mod_id), mod_name]);
         emitter.emit("hasModifier", vec![Value::Entity(constr_id), Value::Entity(mod_id)]);
         emitter.emit("compiler_generated", vec![Value::Entity(constr_id), Value::Int(1)]);
+        emitter.emit("isDefConstr", vec![Value::Entity(constr_id)]);
     }
 }
 
@@ -885,6 +1107,7 @@ fn extract_enum_body(
     body: &Node<'_>,
     source: &[u8],
     type_map: &mut TypeMap,
+    imports: &ImportMap,
 ) {
     let mut cursor = body.walk();
     if cursor.goto_first_child() {
@@ -917,7 +1140,7 @@ fn extract_enum_body(
                 }
                 "enum_body_declarations" => {
                     // Regular class body inside enum
-                    let _ = extract_class_body_children(emitter, file_id, class_id, &child, source, type_map);
+                    let _ = extract_class_body_children(emitter, file_id, class_id, &child, source, type_map, imports);
                 }
                 _ => {}
             }
@@ -981,8 +1204,9 @@ fn extract_class_body(
     body: &Node<'_>,
     source: &[u8],
     type_map: &mut TypeMap,
+    imports: &ImportMap,
 ) -> (bool, bool) {
-    extract_class_body_children(emitter, file_id, class_id, body, source, type_map)
+    extract_class_body_children(emitter, file_id, class_id, body, source, type_map, imports)
 }
 
 /// Returns (has_constructor, has_instance_field_init).
@@ -993,6 +1217,7 @@ fn extract_class_body_children(
     body: &Node<'_>,
     source: &[u8],
     type_map: &mut TypeMap,
+    imports: &ImportMap,
 ) -> (bool, bool) {
     let mut has_constructor = false;
     let mut has_instance_field_init = false;
@@ -1020,26 +1245,26 @@ fn extract_class_body_children(
                     }
                 }
                 "method_declaration" => {
-                    extract_method(emitter, file_id, class_id, &child, source);
+                    extract_method(emitter, file_id, class_id, &child, source, imports);
                 }
                 "constructor_declaration" => {
                     has_constructor = true;
-                    extract_constructor(emitter, file_id, class_id, &child, source);
+                    extract_constructor(emitter, file_id, class_id, &child, source, imports);
                 }
                 "class_declaration" => {
-                    extract_class(emitter, file_id, &child, source, false, Some(class_id), type_map);
+                    extract_class(emitter, file_id, &child, source, false, Some(class_id), type_map, imports);
                 }
                 "interface_declaration" => {
-                    extract_class(emitter, file_id, &child, source, true, Some(class_id), type_map);
+                    extract_class(emitter, file_id, &child, source, true, Some(class_id), type_map, imports);
                 }
                 "enum_declaration" => {
-                    extract_enum(emitter, file_id, &child, source, Some(class_id), type_map);
+                    extract_enum(emitter, file_id, &child, source, Some(class_id), type_map, imports);
                 }
                 "annotation_type_declaration" => {
                     extract_annotation_type(emitter, file_id, &child, source, Some(class_id), type_map);
                 }
                 "record_declaration" => {
-                    extract_class(emitter, file_id, &child, source, false, Some(class_id), type_map);
+                    extract_class(emitter, file_id, &child, source, false, Some(class_id), type_map, imports);
                 }
                 "line_comment" | "block_comment" => {
                     extract_comment(emitter, file_id, &child, source);
@@ -1274,7 +1499,7 @@ fn emit_enum_synthetic_methods(
     {
         let method_id = emitter.alloc();
         let name_val = emitter.string("valueOf");
-        let sig_val = emitter.string("valueOf(String)");
+        let sig_val = emitter.string("valueOf(java.lang.String)");
         let type_val = emitter.string(enum_name);
         emitter.emit("methods", vec![
             Value::Entity(method_id),
@@ -1373,6 +1598,7 @@ fn extract_method(
     class_id: EntityId,
     node: &Node<'_>,
     source: &[u8],
+    imports: &ImportMap,
 ) {
     let name = node.child_by_field("name")
         .map(|n| n.text(source).to_string())
@@ -1387,7 +1613,7 @@ fn extract_method(
     let loc_id = LocationEmitter::emit_for_node(emitter, file_id, node);
 
     // Build signature from parameter types
-    let sig = build_method_signature(&name, node, source);
+    let sig = build_method_signature(&name, node, source, imports);
 
     let name_val = emitter.string(&name);
     let sig_val = emitter.string(&sig);
@@ -1465,6 +1691,7 @@ fn extract_constructor(
     class_id: EntityId,
     node: &Node<'_>,
     source: &[u8],
+    imports: &ImportMap,
 ) {
     let name = node.child_by_field("name")
         .map(|n| n.text(source).to_string())
@@ -1474,7 +1701,7 @@ fn extract_constructor(
     let constr_id = emitter.alloc();
     let loc_id = LocationEmitter::emit_for_node(emitter, file_id, node);
 
-    let sig = build_method_signature(&name, node, source);
+    let sig = build_method_signature(&name, node, source, imports);
 
     let name_val = emitter.string(&name);
     let sig_val = emitter.string(&sig);
@@ -1566,8 +1793,10 @@ fn extract_constructor(
     }
 }
 
-/// Build a method signature string like "methodName(int, String)".
-fn build_method_signature(name: &str, node: &Node<'_>, source: &[u8]) -> String {
+/// Build a method signature string like "methodName(int, java.lang.String)".
+/// Parameter types are resolved to fully-qualified names where possible
+/// using the file's import map.
+fn build_method_signature(name: &str, node: &Node<'_>, source: &[u8], imports: &ImportMap) -> String {
     let mut param_types = Vec::new();
     if let Some(params) = node.child_by_field("parameters") {
         let mut cursor = params.walk();
@@ -1576,7 +1805,14 @@ fn build_method_signature(name: &str, node: &Node<'_>, source: &[u8]) -> String 
                 let child = cursor.node();
                 if child.kind() == "formal_parameter" || child.kind() == "spread_parameter" {
                     if let Some(type_node) = child.child_by_field("type") {
-                        param_types.push(extract_full_type(&type_node, source));
+                        let raw = extract_full_type(&type_node, source);
+                        // Spread parameters render the type with `...` suffix.
+                        let raw = if child.kind() == "spread_parameter" && !raw.ends_with("...") {
+                            format!("{}[]", raw)
+                        } else {
+                            raw
+                        };
+                        param_types.push(qualify_type(&raw, imports));
                     }
                 }
                 if !cursor.goto_next_sibling() { break; }
@@ -1624,6 +1860,10 @@ fn extract_parameters(
                         Value::Entity(param_id),
                         name_val,
                     ]);
+                }
+
+                if child.kind() == "spread_parameter" {
+                    emitter.emit("isVarargsParam", vec![Value::Entity(param_id)]);
                 }
 
                 emitter.emit("hasLocation", vec![
@@ -2232,6 +2472,39 @@ fn extract_stmt(
             }
         }
         "catch_clause" => {
+            // Extract catch formal parameter as a local variable (Java spec).
+            let mut cursor = node.walk();
+            if cursor.goto_first_child() {
+                loop {
+                    let child = cursor.node();
+                    if child.kind() == "catch_formal_parameter" {
+                        let type_text = child.child_by_field("type")
+                            .map(|t| extract_full_type(&t, source))
+                            .unwrap_or_else(|| "unknown".to_string());
+                        if let Some(name) = child.child_by_field("name") {
+                            let name_text = name.text(source).to_string();
+                            if !name_text.is_empty() {
+                                let var_id = emitter.alloc();
+                                let name_val = emitter.string(&name_text);
+                                let type_val = emitter.string(&type_text);
+                                emitter.emit("localvars", vec![
+                                    Value::Entity(var_id),
+                                    name_val,
+                                    type_val,
+                                    Value::Entity(stmt_id),
+                                ]);
+                                let loc_id = LocationEmitter::emit_for_node(emitter, file_id, &child);
+                                emitter.emit("hasLocation", vec![
+                                    Value::Entity(var_id),
+                                    Value::Entity(loc_id),
+                                ]);
+                            }
+                        }
+                        break;
+                    }
+                    if !cursor.goto_next_sibling() { break; }
+                }
+            }
             if let Some(body) = node.child_by_field("body") {
                 extract_stmt(emitter, file_id, &body, source, callable_id, stmt_id, 0);
             }
